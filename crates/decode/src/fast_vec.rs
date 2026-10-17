@@ -146,38 +146,6 @@ impl SequenceOutput<'_, '_> {
     }
 
     #[inline(always)]
-    pub(crate) fn copy_match(&mut self, offset: usize) -> Result<(), DecompressError> {
-        self.copy_match_len(offset, self.match_len)
-    }
-
-    #[inline(always)]
-    pub(crate) fn copy_match_16plus(&mut self, offset: usize) -> Result<(), DecompressError> {
-        if unlikely(offset < 16 || offset > self.output.vec.len()) {
-            return Err(DecompressError::InvalidOffset);
-        }
-        let len = self.match_len;
-        if len == 0 {
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "paranoid"))]
-        unsafe {
-            debug_assert!(
-                self.output.vec.len() + len + WILDCOPY_OVERLENGTH <= self.output.vec.capacity()
-            );
-            // SAFETY: `begin_sequence` proves capacity for the whole sequence.
-            // The offset check proves an initialized source, and offset >= 16
-            // is the precondition for this wider wildcopy path.
-            wild_copy_match_16plus_unchecked(self.output.vec, offset, len);
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            wild_copy_match_paranoid(self.output.vec, offset, len);
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
     pub(crate) fn copy_match_single(&mut self, offset: usize) -> Result<(), DecompressError> {
         if unlikely(offset == 0 || offset > self.output.vec.len()) {
             return Err(DecompressError::InvalidOffset);
@@ -255,6 +223,445 @@ impl SequenceOutput<'_, '_> {
             wild_copy_match_paranoid(self.output.vec, offset, len);
         }
         Ok(())
+    }
+}
+
+/// Bytes the fast sequence path reads past the end of a literal run.
+pub(crate) const LITERAL_OVERREAD: usize = 32;
+
+/// A block's literals and the slack after them.
+///
+/// The fast sequence path copies literals in whole chunks and reads up to
+/// [`LITERAL_OVERREAD`] bytes past a run, so it serves runs whose end plus
+/// that overread is at most `fast_end`: inside the literals and inside the
+/// bytes. The exact path serves the rest.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Literals<'a> {
+    bytes: &'a [u8],
+    len: usize,
+    fast_end: usize,
+}
+
+impl<'a> Literals<'a> {
+    /// The first `len` bytes of `bytes` are the literals; any bytes after
+    /// them are slack the copies may read.
+    pub(crate) fn new(bytes: &'a [u8], len: usize) -> Self {
+        debug_assert!(len <= bytes.len());
+        let len = len.min(bytes.len());
+        Self {
+            bytes,
+            len,
+            fast_end: (len + LITERAL_OVERREAD).min(bytes.len()),
+        }
+    }
+
+    /// Number of literals.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The literals without the slack.
+    pub(crate) fn as_slice(&self) -> &'a [u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// Bytes added to an overlapping match's source after its first four bytes,
+/// per offset below eight (C zstd's `dec32table`).
+const SPREAD_ADD: [usize; 8] = [0, 1, 2, 1, 4, 4, 4, 4];
+/// Bytes then subtracted from the source (C zstd's `dec64table`).
+const SPREAD_SUB: [usize; 8] = [8, 8, 8, 7, 8, 9, 10, 11];
+
+/// One block's sequence output.
+///
+/// The caller's vector is moved in for the block, so its pointer and length
+/// stay in registers. Behind a `&mut Vec`, every byte store may alias the
+/// vector's header, so each copy reloads and stores the length, which
+/// serializes the copies. For the same reason no `&mut SeqOut` leaves the
+/// inlined hot path: the cold path gets the buffer and positions as values.
+///
+/// `new` reserves the block's maximum plus [`WILDCOPY_OVERLENGTH`] bytes; the
+/// paranoid build zeroes that room, so its copies index an initialized slice.
+pub(crate) struct SeqOut {
+    vec: Vec<u8>,
+    /// Bytes of output; every byte below it is initialized.
+    op: usize,
+    /// Largest `op` the block may reach.
+    limit: usize,
+    /// Lowest byte a match may copy from: the frame's first byte.
+    frame_start: usize,
+}
+
+impl SeqOut {
+    /// Takes `vec` for a block of at most `max_block` bytes whose frame starts
+    /// at `frame_start`.
+    #[inline(always)]
+    pub(crate) fn new(mut vec: Vec<u8>, max_block: usize, frame_start: usize) -> Self {
+        let op = vec.len();
+        vec.reserve(max_block + WILDCOPY_OVERLENGTH);
+        #[cfg(feature = "paranoid")]
+        vec.resize(op + max_block + WILDCOPY_OVERLENGTH, 0);
+        Self {
+            vec,
+            op,
+            limit: op + max_block,
+            frame_start: frame_start.min(op),
+        }
+    }
+
+    /// Returns the vector, holding exactly the output written so far.
+    #[inline(always)]
+    pub(crate) fn finish(mut self) -> Vec<u8> {
+        #[cfg(not(feature = "paranoid"))]
+        // SAFETY: `op` never passes `limit`, inside the reserved capacity, and
+        // every byte below it is the vector's original content or was written
+        // by a copy.
+        unsafe {
+            self.vec.set_len(self.op);
+        }
+        #[cfg(feature = "paranoid")]
+        self.vec.truncate(self.op);
+        self.vec
+    }
+
+    /// The buffer, valid for writes up to `limit + WILDCOPY_OVERLENGTH`.
+    #[inline(always)]
+    fn dst(&mut self) -> Dst<'_> {
+        #[cfg(not(feature = "paranoid"))]
+        {
+            Dst(self.vec.as_mut_ptr(), core::marker::PhantomData)
+        }
+        #[cfg(feature = "paranoid")]
+        {
+            Dst(&mut self.vec[..])
+        }
+    }
+
+    /// Executes one sequence: `ll` literals from `lits[lp..]`, then `ml`
+    /// bytes copied from `offset` bytes back. A match may reach before the
+    /// frame into `history`.
+    ///
+    /// The fast path makes three tests: the block's limit, the literals'
+    /// end against their slack, and the offset. Everything else, including the error checks
+    /// in their original order, is in the cold [`execute_exact`].
+    #[inline(always)]
+    pub(crate) fn execute(
+        &mut self,
+        lits: Literals<'_>,
+        lp: usize,
+        ll: usize,
+        ml: usize,
+        offset: usize,
+        history: &[u8],
+    ) -> Result<(), DecompressError> {
+        let op = self.op;
+        let frame_start = self.frame_start;
+        let lit_end = op + ll;
+        let match_end = lit_end + ml;
+        if unlikely(match_end > self.limit) {
+            return Err(DecompressError::CorruptSequences);
+        }
+        if unlikely(
+            lp + ll + LITERAL_OVERREAD > lits.fast_end
+                || offset.wrapping_sub(1) >= lit_end - frame_start,
+        ) {
+            let span = Span {
+                op,
+                ll,
+                ml,
+                frame_start,
+            };
+            self.op = execute_exact(self.dst(), span, lits.as_slice(), lp, offset, history)?;
+            return Ok(());
+        }
+        let mut dst = self.dst();
+        dst.wild_literals(op, lits.bytes, lp, ll);
+        dst.wild_match(lit_end, offset, ml, frame_start);
+        self.op = match_end;
+        Ok(())
+    }
+
+    /// Appends `lits[lp..lp + len]` exactly.
+    #[inline(always)]
+    pub(crate) fn extend_literals(
+        &mut self,
+        lits: Literals<'_>,
+        lp: usize,
+        len: usize,
+    ) -> Result<(), DecompressError> {
+        let lits = lits.as_slice();
+        if unlikely(lp > lits.len() || len > lits.len() - lp) {
+            return Err(DecompressError::CorruptLiterals);
+        }
+        if unlikely(len > self.limit - self.op) {
+            return Err(DecompressError::CorruptSequences);
+        }
+        let op = self.op;
+        self.dst().put(op, &lits[lp..lp + len]);
+        self.op += len;
+        Ok(())
+    }
+}
+
+/// A sequence's place in the output: where it starts, its literal and match
+/// lengths, and the frame's first byte.
+#[derive(Clone, Copy)]
+struct Span {
+    op: usize,
+    ll: usize,
+    ml: usize,
+    frame_start: usize,
+}
+
+/// A sequence near the end of the literals, or whose offset reaches before
+/// the frame or is invalid; returns the new output length. The caller
+/// checked that `span` ends within the block's limit.
+#[cold]
+#[inline(never)]
+fn execute_exact(
+    mut dst: Dst<'_>,
+    span: Span,
+    lits: &[u8],
+    lp: usize,
+    offset: usize,
+    history: &[u8],
+) -> Result<usize, DecompressError> {
+    let Span {
+        op,
+        ll,
+        ml,
+        frame_start,
+    } = span;
+    if lp > lits.len() || ll > lits.len() - lp {
+        return Err(DecompressError::CorruptLiterals);
+    }
+    dst.put(op, &lits[lp..lp + ll]);
+    let lit_end = op + ll;
+    let reach = lit_end - frame_start;
+    if offset == 0 {
+        return Err(DecompressError::InvalidOffset);
+    }
+    let mut done = 0;
+    if offset > reach {
+        // The match starts in the history before the frame and continues
+        // from the frame's first byte.
+        let before = offset - reach;
+        if before > history.len() {
+            return Err(DecompressError::InvalidOffset);
+        }
+        let start = history.len() - before;
+        done = before.min(ml);
+        dst.put(lit_end, &history[start..start + done]);
+    }
+    if ml > done {
+        dst.wild_match(lit_end + done, offset, ml - done, frame_start);
+    }
+    Ok(lit_end + ml)
+}
+
+/// A block's output buffer as the copies see it: the raw pointer, or in the
+/// paranoid build the zeroed slice. Valid for writes up to the block's limit
+/// plus [`WILDCOPY_OVERLENGTH`]; every byte below the output length is
+/// initialized.
+#[cfg(not(feature = "paranoid"))]
+struct Dst<'a>(*mut u8, core::marker::PhantomData<&'a mut [u8]>);
+
+/// A block's output buffer as the copies see it: the raw pointer, or in the
+/// paranoid build the zeroed slice. Valid for writes up to the block's limit
+/// plus [`WILDCOPY_OVERLENGTH`]; every byte below the output length is
+/// initialized.
+#[cfg(feature = "paranoid")]
+struct Dst<'a>(&'a mut [u8]);
+
+impl Dst<'_> {
+    /// Writes `bytes` at `at`; `at + bytes.len()` is within the limit.
+    #[inline(always)]
+    fn put(&mut self, at: usize, bytes: &[u8]) {
+        #[cfg(not(feature = "paranoid"))]
+        // SAFETY: callers keep `at + bytes.len()` within the limit, inside the
+        // reserved capacity, and `bytes` never lies in this buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.0.add(at), bytes.len());
+        }
+        #[cfg(feature = "paranoid")]
+        self.0[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// Copies `len` literals from `lits[lp..]` to `at` in whole chunks: 16
+    /// bytes, then 32-byte chunks. Requires `lp + len + LITERAL_OVERREAD <=
+    /// lits.len()` and `at + len` within the limit.
+    #[inline(always)]
+    fn wild_literals(&mut self, at: usize, lits: &[u8], lp: usize, len: usize) {
+        debug_assert!(lp + len + LITERAL_OVERREAD <= lits.len());
+        #[cfg(not(feature = "paranoid"))]
+        // SAFETY: the source holds `LITERAL_OVERREAD` readable bytes past the
+        // run, and the destination `WILDCOPY_OVERLENGTH` writable bytes past
+        // the limit; the last chunk starts before `len`.
+        unsafe {
+            let src = lits.as_ptr().add(lp);
+            let dst = self.0.add(at);
+            copy_16(src, dst);
+            let mut i = 16;
+            while i < len {
+                copy_32_wide(src.add(i), dst.add(i));
+                i += 32;
+            }
+        }
+        #[cfg(feature = "paranoid")]
+        {
+            self.0[at..at + 16].copy_from_slice(&lits[lp..lp + 16]);
+            let mut i = 16;
+            while i < len {
+                self.0[at + i..at + i + 32].copy_from_slice(&lits[lp + i..lp + i + 32]);
+                i += 32;
+            }
+        }
+    }
+
+    /// Copies a match of `len` bytes from `offset` bytes before `at` in
+    /// whole chunks. Requires `1 <= offset <= at - frame_start` and
+    /// `at + len` within the limit.
+    #[inline(always)]
+    fn wild_match(&mut self, at: usize, offset: usize, len: usize, frame_start: usize) {
+        debug_assert!(offset >= 1 && offset <= at - frame_start);
+        let _ = frame_start;
+        #[cfg(not(feature = "paranoid"))]
+        // SAFETY: the source starts at or after the frame's first byte, inside
+        // the initialized output, and each chunk reads only bytes before the
+        // chunk it writes. Writes end at most 31 bytes past `at + len`, inside
+        // the `WILDCOPY_OVERLENGTH` room past the limit.
+        unsafe {
+            let dst = self.0.add(at);
+            let src = dst.sub(offset);
+            if offset >= 32 {
+                let mut i = 0;
+                loop {
+                    copy_32_wide(src.add(i), dst.add(i));
+                    i += 32;
+                    if i >= len {
+                        break;
+                    }
+                }
+            } else if offset >= 16 {
+                let mut i = 0;
+                loop {
+                    copy_16(src.add(i), dst.add(i));
+                    i += 16;
+                    if i >= len {
+                        break;
+                    }
+                }
+            } else {
+                spread_match(src, dst, offset, len);
+            }
+        }
+        #[cfg(feature = "paranoid")]
+        {
+            let out = &mut *self.0;
+            let src = at - offset;
+            if offset >= 32 {
+                let mut i = 0;
+                loop {
+                    chunk::<32>(out, src + i, at + i);
+                    i += 32;
+                    if i >= len {
+                        break;
+                    }
+                }
+            } else if offset >= 16 {
+                let mut i = 0;
+                loop {
+                    chunk::<16>(out, src + i, at + i);
+                    i += 16;
+                    if i >= len {
+                        break;
+                    }
+                }
+            } else {
+                let mut src = src;
+                if offset < 8 {
+                    for k in 0..4 {
+                        out[at + k] = out[src + k];
+                    }
+                    src += SPREAD_ADD[offset];
+                    chunk::<4>(out, src, at + 4);
+                    src = src + 8 - SPREAD_SUB[offset];
+                } else {
+                    chunk::<8>(out, src, at);
+                    src += 8;
+                }
+                let mut i = 8;
+                while i < len {
+                    chunk::<8>(out, src, at + i);
+                    src += 8;
+                    i += 8;
+                }
+            }
+        }
+    }
+}
+
+/// Copies `N` bytes within `out`, reading them all before writing.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+fn chunk<const N: usize>(out: &mut [u8], src: usize, dst: usize) {
+    let mut value = [0u8; N];
+    value.copy_from_slice(&out[src..src + N]);
+    out[dst..dst + N].copy_from_slice(&value);
+}
+
+/// Copies an overlapping match with `offset < 16` the C zstd way: eight
+/// bytes that spread the period to a distance of at least eight
+/// (`ZSTD_overlapCopy8`), then eight-byte chunks.
+///
+/// # Safety
+///
+/// `src = dst - offset` with `1 <= offset < 16`, `src..dst` initialized,
+/// and `dst..dst + len + 8` writable.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+unsafe fn spread_match(src: *const u8, dst: *mut u8, offset: usize, len: usize) {
+    debug_assert!((1..16).contains(&offset));
+    // SAFETY: see the function contract. Each byte or chunk is read only
+    // after every byte it covers was written: the first four bytes go one at
+    // a time, the spread then leaves the source at least eight bytes behind.
+    unsafe {
+        let mut src = src;
+        if offset < 8 {
+            *dst = *src;
+            *dst.add(1) = *src.add(1);
+            *dst.add(2) = *src.add(2);
+            *dst.add(3) = *src.add(3);
+            src = src.add(SPREAD_ADD[offset]);
+            let word = (src as *const u32).read_unaligned();
+            (dst.add(4) as *mut u32).write_unaligned(word);
+            src = src.add(8).sub(SPREAD_SUB[offset]);
+        } else {
+            copy_8(src, dst);
+            src = src.add(8);
+        }
+        let mut i = 8;
+        while i < len {
+            copy_8(src, dst.add(i));
+            src = src.add(8);
+            i += 8;
+        }
+    }
+}
+
+/// 32-byte copy as one load and one store.
+///
+/// # Safety
+///
+/// `src..src+32` must be readable and `dst..dst+32` writable.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+unsafe fn copy_32_wide(src: *const u8, dst: *mut u8) {
+    // SAFETY: the caller provides readable and writable 32-byte ranges;
+    // unaligned accesses are intentional.
+    unsafe {
+        let v = (src as *const [u8; 32]).read_unaligned();
+        (dst as *mut [u8; 32]).write_unaligned(v);
     }
 }
 
@@ -482,68 +889,6 @@ unsafe fn wild_copy_match_unchecked(vec: &mut Vec<u8>, offset: usize, len: usize
     }
 }
 
-/// # Safety
-///
-/// `src..src+len` must be readable, `op..op+len+64` must be writable, and
-/// `offset >= 16`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn wild_copy_match_16plus_from_ptr(src: *const u8, op: *mut u8, offset: usize, len: usize) {
-    debug_assert!(!src.is_null());
-    debug_assert!(!op.is_null());
-    debug_assert!(offset >= 16);
-    // SAFETY: The caller guarantees source and destination headroom. offset >=
-    // 16 makes these wide chunk copies valid for the overlap cases used here.
-    unsafe {
-        if len <= 16 {
-            copy_16(src, op);
-        } else if offset >= 64 {
-            let mut off = 0usize;
-            loop {
-                copy_64(src.add(off), op.add(off));
-                off += 64;
-                if off >= len {
-                    break;
-                }
-            }
-        } else if offset >= 32 {
-            let mut off = 0usize;
-            loop {
-                copy_32(src.add(off), op.add(off));
-                off += 32;
-                if off >= len {
-                    break;
-                }
-            }
-        } else {
-            let mut off = 0usize;
-            loop {
-                copy_16(src.add(off), op.add(off));
-                off += 16;
-                if off >= len {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn wild_copy_match_16plus_unchecked(vec: &mut Vec<u8>, offset: usize, len: usize) {
-    debug_assert!(offset >= 16 && offset <= vec.len());
-    debug_assert!(vec.len() + len + 64 <= vec.capacity());
-    // SAFETY: offset is validated above, and reserve ensures the 64 bytes of
-    // wildcopy headroom required by this wider-copy variant.
-    unsafe {
-        let ptr = vec.as_mut_ptr();
-        let op = ptr.add(vec.len());
-        let src = op.sub(offset);
-        wild_copy_match_16plus_from_ptr(src, op, offset, len);
-        vec.set_len(vec.len() + len);
-    }
-}
-
 #[cfg(feature = "paranoid")]
 #[inline(always)]
 fn wild_copy_match_paranoid(vec: &mut Vec<u8>, offset: usize, len: usize) {
@@ -624,21 +969,42 @@ mod tests {
         expected
     }
 
+    /// Runs one sequence through `SeqOut::execute` after `prefix`, with
+    /// `slack` readable bytes after the literals, and returns the output.
+    fn seq_out_run(
+        prefix: &[u8],
+        lits: &[u8],
+        slack: usize,
+        ml: usize,
+        offset: usize,
+        history: &[u8],
+    ) -> Result<Vec<u8>, DecompressError> {
+        let mut buf = lits.to_vec();
+        buf.resize(lits.len() + slack, 0xAA);
+        let mut out = SeqOut::new(prefix.to_vec(), lits.len() + ml, 0);
+        let result = out.execute(
+            Literals::new(&buf, lits.len()),
+            0,
+            lits.len(),
+            ml,
+            offset,
+            history,
+        );
+        let v = out.finish();
+        result.map(|()| v)
+    }
+
     fn check_wild_copy_match_offsets(start_offset: usize, end_offset: usize) {
         for offset in start_offset..=end_offset {
+            let seed: Vec<u8> = (0..offset).map(|i| (i as u8).wrapping_mul(37)).collect();
             for len in test_lengths(128) {
-                let mut v = Vec::new();
-                let seed: Vec<u8> = (0..offset).map(|i| (i as u8).wrapping_mul(37)).collect();
-                v.extend_from_slice(&seed);
-                let expected = expected_match(&v, offset, len);
-                let mut output = BlockOutput::new(&mut v, len);
-                let mut sequence = output.begin_sequence(0, len).unwrap();
-                sequence.copy_match(offset).unwrap();
-                assert_eq!(
-                    &v[..offset + len],
-                    &expected[..offset + len],
-                    "offset={offset} len={len}"
-                );
+                let expected = expected_match(&seed, offset, len);
+                // With slack the fast path copies whole chunks; without it
+                // the exact path runs.
+                for slack in [LITERAL_OVERREAD, 0] {
+                    let v = seq_out_run(&seed, &[], slack, len, offset, &[]).unwrap();
+                    assert_eq!(v, expected, "offset={offset} len={len} slack={slack}");
+                }
             }
         }
     }
@@ -715,29 +1081,93 @@ mod tests {
     }
 
     #[test]
-    fn block_output_rejects_bad_match_offset() {
-        let mut dst = b"abcd".to_vec();
-        let mut output = BlockOutput::new(&mut dst, 16);
-        let mut sequence = output
-            .begin_sequence(0, 4)
-            .expect("sequence should fit block");
-        let err = sequence
-            .copy_match(5)
-            .expect_err("match offset should exceed output length");
-        assert_eq!(err, DecompressError::InvalidOffset);
+    fn seq_out_copies_literals_then_matches() {
+        let prefix: Vec<u8> = (0..40u8).map(|i| i.wrapping_mul(29) ^ 0x5A).collect();
+        let lits_all: Vec<u8> = (0..100u8).map(|i| i ^ 0xC3).collect();
+        for ll in 0..=70 {
+            for ml in [3, 17, 40, 100] {
+                for offset in [1, 2, 3, 7, 8, 15, 16, 31, 32, 40 + ll] {
+                    let lits = &lits_all[..ll];
+                    let mut expected = prefix.clone();
+                    expected.extend_from_slice(lits);
+                    let expected = expected_match(&expected, offset, ml);
+                    for slack in [LITERAL_OVERREAD, 5, 0] {
+                        let v = seq_out_run(&prefix, lits, slack, ml, offset, &[]).unwrap();
+                        assert_eq!(v, expected, "ll={ll} ml={ml} offset={offset} slack={slack}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
-    fn block_output_copies_match() {
-        let mut dst = b"abcdefghijklmnop".to_vec();
-        {
-            let mut output = BlockOutput::new(&mut dst, 32);
-            let mut sequence = output
-                .begin_sequence(0, 20)
-                .expect("sequence should fit block");
-            sequence.copy_match_16plus(16).expect("match should fit");
+    fn seq_out_rejects_bad_offsets() {
+        for slack in [LITERAL_OVERREAD, 0] {
+            for offset in [0, 5, 100] {
+                let err = seq_out_run(b"abcd", &[], slack, 4, offset, &[]).unwrap_err();
+                assert_eq!(err, DecompressError::InvalidOffset, "offset={offset}");
+            }
         }
-        assert_eq!(&dst[16..], b"abcdefghijklmnopabcd");
+        // A match may not reach before the frame's first byte.
+        let mut out = SeqOut::new(b"abcdef".to_vec(), 8, 4);
+        let lits = [0u8; LITERAL_OVERREAD];
+        assert_eq!(
+            out.execute(Literals::new(&lits, 0), 0, 0, 4, 3, &[]),
+            Err(DecompressError::InvalidOffset)
+        );
+        assert_eq!(
+            out.execute(Literals::new(&lits, 0), 0, 0, 4, 2, &[]),
+            Ok(())
+        );
+        assert_eq!(out.finish(), b"abcdefefef");
+    }
+
+    #[test]
+    fn seq_out_rejects_overruns() {
+        let lits = [7u8; 10];
+        // More literals than the section holds.
+        let mut out = SeqOut::new(b"ab".to_vec(), 32, 0);
+        assert_eq!(
+            out.execute(Literals::new(&lits, 10), 4, 8, 3, 1, &[]),
+            Err(DecompressError::CorruptLiterals)
+        );
+        // A sequence past the block's limit.
+        let mut out = SeqOut::new(b"ab".to_vec(), 8, 0);
+        assert_eq!(
+            out.execute(Literals::new(&lits, 10), 0, 4, 5, 1, &[]),
+            Err(DecompressError::CorruptSequences)
+        );
+        assert_eq!(
+            out.extend_literals(Literals::new(&lits, 10), 0, 9),
+            Err(DecompressError::CorruptSequences)
+        );
+        assert_eq!(
+            out.extend_literals(Literals::new(&lits, 10), 4, 7),
+            Err(DecompressError::CorruptLiterals)
+        );
+        assert_eq!(out.extend_literals(Literals::new(&lits, 10), 4, 6), Ok(()));
+        assert_eq!(out.finish(), b"ab\x07\x07\x07\x07\x07\x07");
+    }
+
+    #[test]
+    fn seq_out_copies_matches_from_history() {
+        let history = b"abcdefghijklmnop";
+        let prefix = b"qrst";
+        let lits = b"uv";
+        for offset in [7, 8, 20, 22] {
+            for ml in [1, 2, 10, 30] {
+                let mut combined = history.to_vec();
+                combined.extend_from_slice(prefix);
+                combined.extend_from_slice(lits);
+                let expected = expected_match(&combined, offset, ml);
+                for slack in [LITERAL_OVERREAD, 0] {
+                    let v = seq_out_run(prefix, lits, slack, ml, offset, history).unwrap();
+                    assert_eq!(v, expected[history.len()..], "offset={offset} ml={ml}");
+                }
+            }
+        }
+        let err = seq_out_run(prefix, lits, 0, 3, 23, history).unwrap_err();
+        assert_eq!(err, DecompressError::InvalidOffset);
     }
 
     #[test]
@@ -968,24 +1398,24 @@ mod kani_proofs {
         assert_eq!(vec.len(), 8 + len);
     }
 
-    // -- wild_copy_match_16plus_unchecked --
+    // -- spread_match --
 
-    /// offset >= 16 wide-copy path: copy_16/32/64 loops depending
-    /// on offset magnitude.
+    /// Offsets 1..15: the first eight bytes spread the period, then 8-byte
+    /// chunks. Reads stay in `src..dst` and the bytes already written;
+    /// writes stay in `dst..dst + len + 8`.
     #[kani::proof]
-    #[kani::unwind(5)] // 64/16 = 4 iterations max in narrowest loop
-    fn wild_copy_match_16plus_no_oob() {
+    #[kani::unwind(5)] // 24/8 = 3 iterations max
+    fn spread_match_no_oob() {
         let offset: usize = kani::any();
         let len: usize = kani::any();
-        kani::assume(offset >= 16 && offset <= 48);
-        kani::assume(len >= 1 && len <= 64);
+        kani::assume(offset >= 1 && offset < 16);
+        kani::assume(len >= 1 && len <= 24);
 
-        let mut vec = Vec::with_capacity(48 + len + WILDCOPY_OVERLENGTH);
-        vec.extend_from_slice(&[0u8; 48]);
+        let mut buf = [0u8; 16 + 24 + 8];
         unsafe {
-            wild_copy_match_16plus_unchecked(&mut vec, offset, len);
+            let dst = buf.as_mut_ptr().add(16);
+            spread_match(dst.sub(offset), dst, offset, len);
         }
-        assert_eq!(vec.len(), 48 + len);
     }
 
     // -- wild_copy_match_single_unchecked --

@@ -32,12 +32,13 @@ the encoder and core primitives:
 |:---------|:--------|:---------|
 | Encoder indexing | `get_unchecked`, `read_unaligned` | Direct indexing, `from_le_bytes` |
 | Decoder SIMD dispatch | `fearless_simd::dispatch!` | Same (no unsafe needed) |
-| Decoder wild-copy | 16-byte unaligned load/store | `extend_from_slice`, `extend_from_within` |
+| Decoder wild-copy | 16- and 32-byte unaligned copies into spare capacity | Chunked copies within a zeroed slice |
 | Huffman BMI2 dispatch | `#[target_feature]` wrapper | Gated out; generic call |
 
 The safe alternatives use the same algorithms and produce identical output.
 Encode throughput drops roughly 40% (corpus dependent). Decode throughput
-drops roughly 20% due to safe wild-copy fallbacks in `fast_vec.rs`.
+drops roughly 15% (Silesia, level 1), from bounds checks on the copies and
+zeroing each block's output room in `fast_vec.rs`.
 
 The feature exists for users who need a guarantee of zero unsafe, or for
 auditing and benchmarking the cost of safe-only codepaths.

@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
 use crate::BlockDecodeWorkspace;
+use crate::fast_vec::{LITERAL_OVERREAD, Literals};
 use zrip_core::error::DecompressError;
-use zrip_core::huffman::decode::{decode_4_streams_into, decode_single_stream_vec};
+use zrip_core::huffman::decode::{
+    build_pair_table, decode_4_streams_into, decode_4_streams_pairs_into, decode_single_stream_vec,
+    prefers_pairs,
+};
 use zrip_core::huffman::weights::{build_huffman_decode_table_into, parse_huffman_weights_into};
 
 #[derive(Debug, Clone, Copy)]
@@ -86,10 +90,36 @@ fn parse_compressed_header(data: &[u8]) -> Result<(usize, usize, usize, usize), 
     }
 }
 
+/// Where [`decode_literals_ws`] left a block's literals.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LiteralsAt {
+    /// The first `len` bytes of `ws.literal_buf`, followed by
+    /// [`LITERAL_OVERREAD`] zero bytes.
+    Buffer(usize),
+    /// Raw literals in place: `len` bytes from `start` of the block, which
+    /// holds at least [`LITERAL_OVERREAD`] more bytes after them.
+    Block { start: usize, len: usize },
+}
+
+impl LiteralsAt {
+    /// The literals, given the block they were decoded from and the
+    /// workspace's literal buffer.
+    pub(crate) fn resolve<'a>(self, data: &'a [u8], buf: &'a [u8]) -> Literals<'a> {
+        match self {
+            Self::Buffer(len) => Literals::new(buf, len),
+            Self::Block { start, len } => Literals::new(&data[start..], len),
+        }
+    }
+}
+
+/// Decodes the literals section at the start of `data`, returning its size
+/// and where the literals are. Raw literals stay in the block when it has
+/// enough bytes after them for the executor's chunked copies; all others go
+/// to `ws.literal_buf` with that much zeroed slack.
 pub(crate) fn decode_literals_ws(
     data: &[u8],
     ws: &mut BlockDecodeWorkspace,
-) -> Result<usize, DecompressError> {
+) -> Result<(usize, LiteralsAt), DecompressError> {
     if data.is_empty() {
         return Err(DecompressError::CorruptLiterals);
     }
@@ -102,7 +132,7 @@ pub(crate) fn decode_literals_ws(
         _ => unreachable!(),
     };
 
-    let consumed = match block_type {
+    let (consumed, at) = match block_type {
         LiteralsBlockType::Raw => {
             let (regen_size, header_size) = parse_raw_rle_header(data)?;
             if regen_size > zrip_core::frame::MAX_BLOCK_SIZE {
@@ -111,10 +141,21 @@ pub(crate) fn decode_literals_ws(
             if data.len() < header_size + regen_size {
                 return Err(DecompressError::CorruptLiterals);
             }
-            ws.literal_buf.clear();
-            ws.literal_buf
-                .extend_from_slice(&data[header_size..header_size + regen_size]);
-            header_size + regen_size
+            let end = header_size + regen_size;
+            if data.len() - end >= LITERAL_OVERREAD {
+                (
+                    end,
+                    LiteralsAt::Block {
+                        start: header_size,
+                        len: regen_size,
+                    },
+                )
+            } else {
+                ws.literal_buf.clear();
+                ws.literal_buf.extend_from_slice(&data[header_size..end]);
+                ws.literal_buf.resize(regen_size + LITERAL_OVERREAD, 0);
+                (end, LiteralsAt::Buffer(regen_size))
+            }
         }
         LiteralsBlockType::Rle => {
             let (regen_size, header_size) = parse_raw_rle_header(data)?;
@@ -127,7 +168,8 @@ pub(crate) fn decode_literals_ws(
             let byte = data[header_size];
             ws.literal_buf.clear();
             ws.literal_buf.resize(regen_size, byte);
-            header_size + 1
+            ws.literal_buf.resize(regen_size + LITERAL_OVERREAD, 0);
+            (header_size + 1, LiteralsAt::Buffer(regen_size))
         }
         LiteralsBlockType::Compressed | LiteralsBlockType::Treeless => {
             let treeless = matches!(block_type, LiteralsBlockType::Treeless);
@@ -170,6 +212,7 @@ pub(crate) fn decode_literals_ws(
                         &mut ws.huf_table,
                         &mut ws.huf_all_weights,
                     )?;
+                    ws.huf_pairs_valid = false;
                     ws.huf_last_weights.clear();
                     ws.huf_last_weights.extend_from_slice(&ws.huf_weights);
                     ws.huf_last_weights_valid = true;
@@ -192,6 +235,19 @@ pub(crate) fn decode_literals_ws(
                     regen_size,
                     &mut ws.literal_buf,
                 )?;
+            } else if prefers_pairs(regen_size, compressed_stream.len()) {
+                if !ws.huf_pairs_valid {
+                    build_pair_table(&ws.huf_table, ws.huf_table_log, &mut ws.huf_pairs)?;
+                    ws.huf_pairs_valid = true;
+                }
+                decode_4_streams_pairs_into(
+                    &ws.huf_table,
+                    ws.huf_table_log,
+                    &ws.huf_pairs,
+                    compressed_stream,
+                    regen_size,
+                    &mut ws.literal_buf,
+                )?;
             } else {
                 decode_4_streams_into(
                     &ws.huf_table,
@@ -202,9 +258,57 @@ pub(crate) fn decode_literals_ws(
                 )?;
             }
 
-            header_size + compressed_size
+            ws.literal_buf.resize(regen_size + LITERAL_OVERREAD, 0);
+            (
+                header_size + compressed_size,
+                LiteralsAt::Buffer(regen_size),
+            )
         }
     };
 
-    Ok(consumed)
+    Ok((consumed, at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A raw literals section of `len` bytes (two-byte header), followed by
+    /// `tail` more block bytes.
+    fn raw_section(len: usize, tail: usize) -> Vec<u8> {
+        let mut data = vec![0b0100 | ((len as u8 & 0x0F) << 4), (len >> 4) as u8];
+        data.extend((0..len).map(|i| i as u8 ^ 0x5A));
+        data.extend(core::iter::repeat_n(0xEE, tail));
+        data
+    }
+
+    #[test]
+    fn raw_literals_stay_in_the_block_when_slack_follows() {
+        let mut ws = BlockDecodeWorkspace::new();
+        let data = raw_section(40, LITERAL_OVERREAD);
+        let (consumed, at) = decode_literals_ws(&data, &mut ws).unwrap();
+        assert_eq!(consumed, 42);
+        assert!(matches!(at, LiteralsAt::Block { start: 2, len: 40 }));
+        let lits = at.resolve(&data, &ws.literal_buf);
+        assert_eq!(lits.as_slice(), &data[2..42]);
+    }
+
+    #[test]
+    fn literals_without_block_slack_are_copied_with_zeroed_slack() {
+        let mut ws = BlockDecodeWorkspace::new();
+        let data = raw_section(40, LITERAL_OVERREAD - 1);
+        let (_, at) = decode_literals_ws(&data, &mut ws).unwrap();
+        assert!(matches!(at, LiteralsAt::Buffer(40)));
+        assert_eq!(ws.literal_buf.len(), 40 + LITERAL_OVERREAD);
+        assert!(ws.literal_buf[40..].iter().all(|&b| b == 0));
+        let lits = at.resolve(&data, &ws.literal_buf);
+        assert_eq!(lits.as_slice(), &data[2..42]);
+
+        // RLE literals get the same slack.
+        let rle = [0b0001 | (5 << 3), b'q'];
+        let (consumed, at) = decode_literals_ws(&rle, &mut ws).unwrap();
+        assert_eq!(consumed, 2);
+        assert_eq!(at.resolve(&rle, &ws.literal_buf).as_slice(), b"qqqqq");
+        assert_eq!(ws.literal_buf.len(), 5 + LITERAL_OVERREAD);
+    }
 }

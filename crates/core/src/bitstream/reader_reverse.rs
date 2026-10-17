@@ -159,6 +159,14 @@ impl<'a> ReverseBitReader<'a> {
         64usize.saturating_sub(self.bits_consumed as usize) + self.ptr * 8
     }
 
+    /// Whether every bit was read, and no more. Reads past the stream's
+    /// start push the consumed count above 64, which this rejects, as C
+    /// zstd's `BIT_endOfDStream` does.
+    #[inline]
+    pub fn is_exhausted(&self) -> bool {
+        self.ptr == 0 && self.bits_consumed == 64
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.bits_consumed >= 64 && self.ptr == 0

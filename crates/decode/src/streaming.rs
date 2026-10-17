@@ -444,13 +444,14 @@ impl<R: Read> FrameDecoder<R> {
         let history: &[u8] = &self.decode_history;
         let block_data = &self.read_buf[..block_size];
 
-        let lit_consumed = decode_literals_ws(block_data, &mut self.ws)
+        let (lit_consumed, lits_at) = decode_literals_ws(block_data, &mut self.ws)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         let remaining = &block_data[lit_consumed..];
 
         if remaining.is_empty() {
-            self.output_buf.extend_from_slice(&self.ws.literal_buf);
+            let lits = lits_at.resolve(block_data, &self.ws.literal_buf);
+            self.output_buf.extend_from_slice(lits.as_slice());
             return Ok(());
         }
 
@@ -458,7 +459,8 @@ impl<R: Read> FrameDecoder<R> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         if num_sequences == 0 {
-            self.output_buf.extend_from_slice(&self.ws.literal_buf);
+            let lits = lits_at.resolve(block_data, &self.ws.literal_buf);
+            self.output_buf.extend_from_slice(lits.as_slice());
             return Ok(());
         }
 
@@ -484,7 +486,7 @@ impl<R: Read> FrameDecoder<R> {
             num_sequences,
             &mut self.seq_tables,
             &mut self.rep_offsets,
-            &self.ws.literal_buf,
+            lits_at.resolve(block_data, &self.ws.literal_buf),
             &mut self.output_buf,
             scope,
         )

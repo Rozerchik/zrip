@@ -2,7 +2,7 @@ use crate::bitstream::primitives as bitstream_primitives;
 use crate::bitstream::reader_reverse::ReverseBitReader;
 use crate::error::DecompressError;
 use crate::huffman::primitives as huffman_primitives;
-use crate::huffman::{DECODE_TABLE_SIZE, HuffmanDecodeEntry};
+use crate::huffman::{DECODE_TABLE_SIZE, HuffmanDecodeEntry, PAIR_TABLE_LOG, PAIR_TABLE_SIZE};
 
 #[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
 #[target_feature(enable = "bmi2")]
@@ -31,28 +31,31 @@ pub(super) unsafe fn decode_single_stream_bmi2_safe(
 fn decode_4_streams_core_bmi2(
     table: &[HuffmanDecodeEntry],
     table_log: u8,
+    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
     data: &[u8],
     output_size: usize,
     output: &mut [u8],
 ) -> Result<(), DecompressError> {
-    decode_4_streams_core(table, table_log, data, output_size, output)
+    decode_4_streams_core(table, table_log, pairs, data, output_size, output)
 }
 
 #[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
 pub(super) unsafe fn decode_4_streams_core_bmi2_safe(
     table: &[HuffmanDecodeEntry],
     table_log: u8,
+    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
     data: &[u8],
     output_size: usize,
     output: &mut [u8],
 ) -> Result<(), DecompressError> {
     // SAFETY: The caller verifies BMI2 availability via has_bmi2().
-    unsafe { decode_4_streams_core_bmi2(table, table_log, data, output_size, output) }
+    unsafe { decode_4_streams_core_bmi2(table, table_log, pairs, data, output_size, output) }
 }
 
 pub(super) fn decode_4_streams_core(
     table: &[HuffmanDecodeEntry],
     table_log: u8,
+    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
     data: &[u8],
     output_size: usize,
     output: &mut [u8],
@@ -214,6 +217,75 @@ pub(super) fn decode_4_streams_core(
         let by_output = end.saturating_sub(o_idx) / 5;
         let by_input = p_idx.saturating_sub(limit) / 7;
         by_output.min(by_input)
+    }
+
+    // Two-symbol rounds: four lookups per stream (at most 44 bits after a
+    // load that leaves at most seven consumed), gathered in one word and
+    // stored as eight bytes. The store's bytes past the decoded symbols stay
+    // inside the stream's own segment, where the next round or the end
+    // overwrites them, so a round needs eight bytes of room.
+    #[inline(always)]
+    fn pair_rounds(o_idx: usize, end: usize, p_idx: usize, limit: usize) -> usize {
+        let by_output = end.saturating_sub(o_idx) / PAIR_WINDOW;
+        let by_input = p_idx.saturating_sub(limit) / 7;
+        by_output.min(by_input)
+    }
+    const PAIR_SHIFT: u32 = 64 - PAIR_TABLE_LOG as u32;
+    /// Output bytes a round may touch: four lookups of two bytes, each at
+    /// most two bytes after the last, masked to stay in the window.
+    const PAIR_WINDOW: usize = 10;
+    macro_rules! decode_pairs {
+        ($pairs:expr, $b:expr, $output:expr, $o_idx:expr) => {{
+            // One bounds check per round: each lookup stores both bytes of
+            // its row at most six bytes in and advances by its count.
+            let window: &mut [u8; PAIR_WINDOW] = (&mut $output[$o_idx..$o_idx + PAIR_WINDOW])
+                .try_into()
+                .unwrap();
+            let mut o = 0usize;
+            for _ in 0..4 {
+                let row = $pairs[($b >> PAIR_SHIFT) as usize];
+                $b <<= (row >> 16) & 0xFF;
+                let at = o & 7;
+                window[at..at + 2].copy_from_slice(&(row as u16).to_le_bytes());
+                o += (row >> 24) as usize;
+            }
+            $o_idx += o;
+        }};
+    }
+    if let Some(pairs) = pairs {
+        let mut rounds = pair_rounds(o1_idx, seg1_end, p1_idx, fast1_limit)
+            .min(pair_rounds(o2_idx, seg2_end, p2_idx, fast2_limit))
+            .min(pair_rounds(o3_idx, seg3_end, p3_idx, fast3_limit))
+            .min(pair_rounds(o4_idx, seg4_end, p4_idx, fast4_limit));
+        if rounds > 0 {
+            let mut b1 = (c1 | 1) << bc1;
+            let mut b2 = (c2 | 1) << bc2;
+            let mut b3 = (c3 | 1) << bc3;
+            let mut b4 = (c4 | 1) << bc4;
+            loop {
+                for _ in 0..rounds {
+                    reload!(b1, p1_idx, r1.data);
+                    decode_pairs!(pairs, b1, out1, o1_idx);
+                    reload!(b2, p2_idx, r2.data);
+                    decode_pairs!(pairs, b2, out2, o2_idx);
+                    reload!(b3, p3_idx, r3.data);
+                    decode_pairs!(pairs, b3, out3, o3_idx);
+                    reload!(b4, p4_idx, r4.data);
+                    decode_pairs!(pairs, b4, out4, o4_idx);
+                }
+                rounds = pair_rounds(o1_idx, seg1_end, p1_idx, fast1_limit)
+                    .min(pair_rounds(o2_idx, seg2_end, p2_idx, fast2_limit))
+                    .min(pair_rounds(o3_idx, seg3_end, p3_idx, fast3_limit))
+                    .min(pair_rounds(o4_idx, seg4_end, p4_idx, fast4_limit));
+                if rounds == 0 {
+                    break;
+                }
+            }
+            unload!(b1, c1, bc1, p1_idx, r1.data);
+            unload!(b2, c2, bc2, p2_idx, r2.data);
+            unload!(b3, c3, bc3, p3_idx, r3.data);
+            unload!(b4, c4, bc4, p4_idx, r4.data);
+        }
     }
 
     let mut rounds = safe_rounds(o1_idx, seg1_end, p1_idx, fast1_limit)

@@ -8,15 +8,129 @@ use zrip_core::fse::{
 #[cfg(not(feature = "paranoid"))]
 use core::mem::MaybeUninit;
 
-#[cfg(feature = "paranoid")]
-use zrip_core::fse::FSE_SEQ_DECODE_ENTRY_ZERO;
+/// A bit count below 32. Every sequence field and state transition reads
+/// fewer bits. As an enum its range reaches the compiler with each load, so
+/// shifts and masks by it need no `& 63` in front of `shrx` or `bzhi`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum BitCount {
+    #[default]
+    B0,
+    B1,
+    B2,
+    B3,
+    B4,
+    B5,
+    B6,
+    B7,
+    B8,
+    B9,
+    B10,
+    B11,
+    B12,
+    B13,
+    B14,
+    B15,
+    B16,
+    B17,
+    B18,
+    B19,
+    B20,
+    B21,
+    B22,
+    B23,
+    B24,
+    B25,
+    B26,
+    B27,
+    B28,
+    B29,
+    B30,
+    B31,
+}
+
+impl BitCount {
+    const ALL: [Self; 32] = [
+        Self::B0,
+        Self::B1,
+        Self::B2,
+        Self::B3,
+        Self::B4,
+        Self::B5,
+        Self::B6,
+        Self::B7,
+        Self::B8,
+        Self::B9,
+        Self::B10,
+        Self::B11,
+        Self::B12,
+        Self::B13,
+        Self::B14,
+        Self::B15,
+        Self::B16,
+        Self::B17,
+        Self::B18,
+        Self::B19,
+        Self::B20,
+        Self::B21,
+        Self::B22,
+        Self::B23,
+        Self::B24,
+        Self::B25,
+        Self::B26,
+        Self::B27,
+        Self::B28,
+        Self::B29,
+        Self::B30,
+        Self::B31,
+    ];
+
+    /// The count `count`, which is below 32 in every table the decoder builds.
+    const fn new(count: u8) -> Self {
+        debug_assert!(count < 32);
+        Self::ALL[(count & 31) as usize]
+    }
+
+    /// The count as a number.
+    #[inline(always)]
+    pub(crate) const fn get(self) -> u32 {
+        self as u32
+    }
+}
+
+/// One sequence decoding row: the next state's base and bit count, and the
+/// decoded value's baseline and extra-bit count.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SeqEntry {
+    pub(crate) base_line: u16,
+    pub(crate) num_bits: BitCount,
+    pub(crate) extra_bits: BitCount,
+    pub(crate) baseline_value: u32,
+}
+
+impl SeqEntry {
+    const fn new(base_line: u16, num_bits: u8, extra_bits: u8, baseline_value: u32) -> Self {
+        Self {
+            base_line,
+            num_bits: BitCount::new(num_bits),
+            extra_bits: BitCount::new(extra_bits),
+            baseline_value,
+        }
+    }
+}
+
+impl From<FseSeqDecodeEntry> for SeqEntry {
+    fn from(e: FseSeqDecodeEntry) -> Self {
+        Self::new(e.base_line, e.num_bits, e.extra_bits, e.baseline_value)
+    }
+}
 
 pub(crate) struct SeqTable {
     initialized: usize,
     #[cfg(not(feature = "paranoid"))]
-    data: [MaybeUninit<FseSeqDecodeEntry>; FSE_SEQ_TABLE_CAPACITY],
+    data: [MaybeUninit<SeqEntry>; FSE_SEQ_TABLE_CAPACITY],
     #[cfg(feature = "paranoid")]
-    data: [FseSeqDecodeEntry; FSE_SEQ_TABLE_CAPACITY],
+    data: [SeqEntry; FSE_SEQ_TABLE_CAPACITY],
 }
 
 impl Clone for SeqTable {
@@ -37,35 +151,52 @@ impl Clone for SeqTable {
 }
 
 impl SeqTable {
-    #[cfg(not(feature = "paranoid"))]
+    /// A table with no initialized entries.
+    fn empty(initialized: usize) -> Self {
+        Self {
+            initialized,
+            #[cfg(not(feature = "paranoid"))]
+            data: [const { MaybeUninit::uninit() }; FSE_SEQ_TABLE_CAPACITY],
+            #[cfg(feature = "paranoid")]
+            data: [SeqEntry::new(0, 0, 0, 0); FSE_SEQ_TABLE_CAPACITY],
+        }
+    }
+
+    #[inline(always)]
+    fn set(&mut self, idx: usize, entry: SeqEntry) {
+        #[cfg(not(feature = "paranoid"))]
+        {
+            self.data[idx] = MaybeUninit::new(entry);
+        }
+        #[cfg(feature = "paranoid")]
+        {
+            self.data[idx] = entry;
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn set_single(&mut self, val: FseSeqDecodeEntry) {
-        self.data[0] = MaybeUninit::new(val);
+        self.set(0, val.into());
         self.initialized = 1;
     }
 
-    #[cfg(feature = "paranoid")]
-    #[inline(always)]
-    pub(crate) fn set_single(&mut self, val: FseSeqDecodeEntry) {
-        self.data[0] = val;
-        self.initialized = 1;
-    }
-
+    /// The row for `idx`, which the caller masks below the capacity.
     #[cfg(not(feature = "paranoid"))]
     #[inline(always)]
-    pub(crate) unsafe fn get(&self, idx: usize) -> FseSeqDecodeEntry {
+    pub(crate) unsafe fn get(&self, idx: usize) -> &SeqEntry {
         debug_assert!(idx < self.initialized);
         // SAFETY: The FSE state machine bounds idx to [0, 1 << accuracy_log).
         // promote_* and fill_* initialize all entries in that range.
         // set_single is used only for RLE tables, whose state is always zero.
-        unsafe { self.data[idx].assume_init() }
+        unsafe { self.data[idx].assume_init_ref() }
     }
 
+    /// The row for `idx`, which the caller masks below the capacity.
     #[cfg(feature = "paranoid")]
     #[inline(always)]
-    pub(crate) fn get(&self, idx: usize) -> FseSeqDecodeEntry {
+    pub(crate) fn get(&self, idx: usize) -> &SeqEntry {
         debug_assert!(idx < self.initialized);
-        self.data[idx]
+        &self.data[idx]
     }
 
     /// Rewrites the first `fse.len()` entries in place from a decode table,
@@ -74,148 +205,64 @@ impl SeqTable {
     #[inline(always)]
     fn fill(&mut self, fse: &[FseDecodeEntry], extra: impl Fn(u8) -> (u8, u32)) {
         debug_assert!(fse.len() <= FSE_SEQ_TABLE_CAPACITY);
-        let mut written = 0;
-        for (slot, e) in self.data.iter_mut().zip(fse) {
+        let n = fse.len().min(FSE_SEQ_TABLE_CAPACITY);
+        for (i, e) in fse[..n].iter().enumerate() {
             let (extra_bits, baseline_value) = extra(e.symbol);
-            let entry = FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits,
-                baseline_value,
-            };
-            #[cfg(not(feature = "paranoid"))]
-            {
-                *slot = MaybeUninit::new(entry);
-            }
-            #[cfg(feature = "paranoid")]
-            {
-                *slot = entry;
-            }
-            written += 1;
+            self.set(
+                i,
+                SeqEntry::new(e.base_line, e.num_bits, extra_bits, baseline_value),
+            );
         }
-        self.initialized = written;
+        self.initialized = n;
     }
 
     pub(crate) fn fill_ll(&mut self, fse: &[FseDecodeEntry]) {
-        self.fill(fse, |s| {
-            (LL_BITS_TABLE[s as usize], LL_BASELINE_TABLE[s as usize])
-        });
+        self.fill(fse, ll_extra);
     }
 
     pub(crate) fn fill_ml(&mut self, fse: &[FseDecodeEntry]) {
-        self.fill(fse, |s| {
-            (ML_BITS_TABLE[s as usize], ML_BASELINE_TABLE[s as usize])
-        });
+        self.fill(fse, ml_extra);
     }
 
     pub(crate) fn fill_of(&mut self, fse: &[FseDecodeEntry]) {
-        self.fill(fse, |s| (s, 1u32 << s));
+        self.fill(fse, of_extra);
     }
 
-    #[cfg(not(feature = "paranoid"))]
+    fn promote(fse: &[FseDecodeEntry], extra: impl Fn(u8) -> (u8, u32)) -> Self {
+        let mut table = Self::empty(0);
+        table.fill(fse, extra);
+        table
+    }
+
     pub(crate) fn promote_ll(fse: &[FseDecodeEntry]) -> Self {
-        debug_assert!(fse.len() <= FSE_SEQ_TABLE_CAPACITY);
-        let mut table = Self {
-            initialized: fse.len(),
-            data: [const { MaybeUninit::uninit() }; FSE_SEQ_TABLE_CAPACITY],
-        };
-        for (i, e) in fse.iter().enumerate() {
-            table.data[i] = MaybeUninit::new(FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits: LL_BITS_TABLE[e.symbol as usize],
-                baseline_value: LL_BASELINE_TABLE[e.symbol as usize],
-            });
-        }
-        table
+        Self::promote(fse, ll_extra)
     }
 
-    #[cfg(feature = "paranoid")]
-    pub(crate) fn promote_ll(fse: &[FseDecodeEntry]) -> Self {
-        let mut table = Self {
-            initialized: fse.len(),
-            data: [FSE_SEQ_DECODE_ENTRY_ZERO; FSE_SEQ_TABLE_CAPACITY],
-        };
-        for (i, e) in fse.iter().enumerate() {
-            table.data[i] = FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits: LL_BITS_TABLE[e.symbol as usize],
-                baseline_value: LL_BASELINE_TABLE[e.symbol as usize],
-            };
-        }
-        table
-    }
-
-    #[cfg(not(feature = "paranoid"))]
     pub(crate) fn promote_ml(fse: &[FseDecodeEntry]) -> Self {
-        debug_assert!(fse.len() <= FSE_SEQ_TABLE_CAPACITY);
-        let mut table = Self {
-            initialized: fse.len(),
-            data: [const { MaybeUninit::uninit() }; FSE_SEQ_TABLE_CAPACITY],
-        };
-        for (i, e) in fse.iter().enumerate() {
-            table.data[i] = MaybeUninit::new(FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits: ML_BITS_TABLE[e.symbol as usize],
-                baseline_value: ML_BASELINE_TABLE[e.symbol as usize],
-            });
-        }
-        table
+        Self::promote(fse, ml_extra)
     }
 
-    #[cfg(feature = "paranoid")]
-    pub(crate) fn promote_ml(fse: &[FseDecodeEntry]) -> Self {
-        let mut table = Self {
-            initialized: fse.len(),
-            data: [FSE_SEQ_DECODE_ENTRY_ZERO; FSE_SEQ_TABLE_CAPACITY],
-        };
-        for (i, e) in fse.iter().enumerate() {
-            table.data[i] = FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits: ML_BITS_TABLE[e.symbol as usize],
-                baseline_value: ML_BASELINE_TABLE[e.symbol as usize],
-            };
-        }
-        table
-    }
-
-    #[cfg(not(feature = "paranoid"))]
     pub(crate) fn promote_of(fse: &[FseDecodeEntry]) -> Self {
-        debug_assert!(fse.len() <= FSE_SEQ_TABLE_CAPACITY);
-        let mut table = Self {
-            initialized: fse.len(),
-            data: [const { MaybeUninit::uninit() }; FSE_SEQ_TABLE_CAPACITY],
-        };
-        for (i, e) in fse.iter().enumerate() {
-            table.data[i] = MaybeUninit::new(FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits: e.symbol,
-                baseline_value: 1u32 << e.symbol,
-            });
-        }
-        table
+        Self::promote(fse, of_extra)
     }
+}
 
-    #[cfg(feature = "paranoid")]
-    pub(crate) fn promote_of(fse: &[FseDecodeEntry]) -> Self {
-        let mut table = Self {
-            initialized: fse.len(),
-            data: [FSE_SEQ_DECODE_ENTRY_ZERO; FSE_SEQ_TABLE_CAPACITY],
-        };
-        for (i, e) in fse.iter().enumerate() {
-            table.data[i] = FseSeqDecodeEntry {
-                base_line: e.base_line,
-                num_bits: e.num_bits,
-                extra_bits: e.symbol,
-                baseline_value: 1u32 << e.symbol,
-            };
-        }
-        table
-    }
+fn ll_extra(symbol: u8) -> (u8, u32) {
+    (
+        LL_BITS_TABLE[symbol as usize],
+        LL_BASELINE_TABLE[symbol as usize],
+    )
+}
+
+fn ml_extra(symbol: u8) -> (u8, u32) {
+    (
+        ML_BITS_TABLE[symbol as usize],
+        ML_BASELINE_TABLE[symbol as usize],
+    )
+}
+
+fn of_extra(symbol: u8) -> (u8, u32) {
+    (symbol, 1u32 << symbol)
 }
 
 #[cfg(test)]
@@ -272,5 +319,13 @@ mod tests {
 
         assert_eq!(paranoid_unsafe_call!(table.get(0)).baseline_value, 1);
         assert_eq!(paranoid_unsafe_call!(table.get(1)).baseline_value, 2);
+        assert_eq!(paranoid_unsafe_call!(table.get(3)).extra_bits.get(), 3);
+    }
+
+    #[test]
+    fn bit_counts_keep_their_value() {
+        for count in 0..32u8 {
+            assert_eq!(BitCount::new(count).get(), u32::from(count));
+        }
     }
 }

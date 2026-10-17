@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Faster decoding on the Silesia corpus: 9-18% across levels (12% at level
+  1), 13% on frames written by C zstd at level 1, and 13-22% in the
+  `paranoid` build.
+  - The sequence loop keeps the output position in a register instead of
+    updating the vector's length after every copy.
+  - It refills its bits once per sequence and reads them with one shift and
+    one `bzhi`.
+  - The fast path makes three checks per sequence; the rest move to a cold
+    path.
+  - Literals are followed by 32 bytes of slack and copied in 16- and 32-byte
+    chunks. Raw literals are read in place.
+  - Matches with offsets below 8 are copied eight bytes at a time.
+- Literal sections of at most five bits per symbol decode with a
+  two-symbol Huffman table.
+
+### Fixed
+
+- A sequences bitstream that runs out of bits before its last sequence
+  fails with `CorruptSequences`, as it does in C zstd. The decoder read past
+  the stream's start and could return wrong bytes.
+
 ## [0.8.11] - 2026-09-27
 
 ### Changed

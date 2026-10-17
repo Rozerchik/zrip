@@ -299,28 +299,48 @@ Enable via `Options::ldm(true)` (requires the `ldm` feature, on by default).
 
 ### Sequence execution (`crates/decode/src/exec.rs`)
 
-`#![forbid(unsafe_code)]`. A single safe Rust implementation handles all
-platforms. `SeqTable` stores fixed-size 512-entry FSE sequence tables indexed
-with `state & 511`. In default builds the backing storage is
-`[MaybeUninit<FseSeqDecodeEntry>; 512]`, so table promotion initializes only
-the states that the FSE accuracy log can reach. The hot loop copies each
-`FseSeqDecodeEntry` out of the table, letting LLVM keep fields in registers.
-Under `paranoid`, `SeqTable` uses fully initialized
-`[FseSeqDecodeEntry; 512]` storage and the hot loop borrows entries by
-reference to avoid copying initialized padding-heavy structs.
+`#![forbid(unsafe_code)]` under `paranoid`; the copies it calls live in
+`fast_vec.rs`. One safe Rust loop handles all platforms, shaped after C
+zstd's `ZSTD_decompressSequences_body`:
 
-2-sequence unrolled decode loop: decodes 2 sequences per iteration while the
-bit buffer has >= 16 bytes remaining. Cuts loop overhead in half.
+- **Bit reader.** `SeqBits` counts unread bits in a 64-bit container, so a
+  read is one shift and one `bzhi`. It is a small `Copy` value that takes
+  the stream on each refill, so it stays in registers. The loop refills once
+  per sequence, after the state update, and once more only when a
+  sequence's extra bits exceed 31 (`MID_RELOAD_THRESHOLD`). Reads past the
+  stream's start make the unread count wrap, and the end check rejects the
+  stream, as C's `BIT_endOfDStream` does.
+- **Rows.** `SeqEntry` holds the next state's base and bit count and the
+  value's baseline and extra-bit count. Both counts are a 32-variant
+  `#[repr(u8)]` enum (`BitCount`): its range reaches LLVM with every load,
+  so the `bzhi` needs no `& 63`. The loop copies each row out. Holding
+  references instead made LLVM move the state updates across the loop's back
+  edge and spill them.
+- **Output.** `SeqOut` moves the caller's `Vec` into a local for the block,
+  so its pointer and length stay in registers. Behind a `&mut Vec`, every
+  byte store may alias the vector's header, and each copy reloaded and stored
+  the length. The cold path takes the buffer and positions as values, so no
+  `&mut SeqOut` leaves the hot loop. `SeqOut::new` reserves the block's
+  maximum plus `WILDCOPY_OVERLENGTH` bytes; the length is set once, at the
+  end.
+- **Checks.** The fast path makes three tests: the block's limit, whether the
+  literal run ends at least `LITERAL_OVERREAD` (32) bytes before the end of
+  its readable bytes, and the offset. Everything else (literal overruns,
+  matches into a dictionary's history, invalid offsets, runs near the end of
+  the literals) goes to the `#[cold]` `execute_exact`, which checks in the
+  original error order.
+- **Literals.** `decode_literals_ws` leaves 32 zero bytes after the literals
+  it decodes into the workspace, and borrows raw literals in place when the
+  block holds 32 more bytes after them, so literal copies need no
+  length-dependent branches.
 
-Pre-allocated output buffer: reserves `MAX_BLOCK_SIZE + 64` bytes upfront so
-wild copies never trigger reallocation.
+The last sequence of a block is peeled off, so the loop never tests for it.
 
-Literal copies and match copies use wild-copy functions in `fast_vec.rs`
+Literal copies and match copies use the chunked copies in `fast_vec.rs`
 (see [Wild copies](#wild-copies) below).
 
 `fearless_simd::dispatch!` compiles the function with platform target features,
-enabling the compiler to generate BMI2 bit extraction instructions (`shlx`,
-`shrx`) and auto-vectorize bitstream operations.
+enabling BMI2 bit extraction (`shlx`, `shrx`, `bzhi`).
 
 
 ### FSE tables
@@ -343,6 +363,9 @@ predefined tables in `std` builds. Built once, then `SeqTable`-cloned per use.
 
 
 ### Bitstream (`crates/core/src/bitstream/reader_reverse.rs`)
+
+Used by the Huffman decoders, the table readers and blocks with a single
+sequence. Blocks with more sequences use `SeqBits` (see above).
 
 **bitsConsumed model.** Tracks consumed bits instead of available bits.
 Peek uses `(container << consumed) >> (64 - n)` (2 ops) vs the 3-op
@@ -377,28 +400,40 @@ Slow path finishes remaining symbols one stream at a time near exhaustion.
 Treeless block reuse: `huf_valid` flag allows treeless literal blocks to reuse
 the previous Huffman decode table with no re-parse or rebuild.
 
-Literal buffer padding: appends 32 zero bytes past literal data. Enables
-unconditional SIMD loads in the sequence decode loop without bounds checks.
+**Two-symbol tables** (`build_pair_table`, `decode_4_streams_pairs_into`).
+For literal sections of at most five bits per symbol, the fast loop reads an
+11-bit table whose rows decode one or two symbols (C zstd's `HUF_DEltX2`).
+The table is built from the single-symbol rows and rebuilt only after a new
+tree. Each lookup stores both bytes of its row and advances by its symbol
+count; one bounds check covers a round's 10-byte output window.
+`prefers_pairs` applies C's timing model (`HUF_selectDecoder`) under that
+five-bit limit: with longer codes few pairs fit in 11 bits, and the
+single-symbol loop is faster. Every stream ends on the single-symbol table.
+
+Literal buffer padding: decoded literals are followed by 32 zero bytes, and
+raw literals are read in place when the block holds 32 more bytes after
+them, so the sequence loop copies literals in whole chunks.
 
 
 ### Wild copies (`crates/decode/src/fast_vec.rs`)
 
 All unsafe gated by `#[cfg(not(feature = "paranoid"))]`.
 
-- **16-byte chunk copy** (`copy_16`). Two unaligned u64 load/stores for
-  literal and match copies.
-- **fast_extend_from_slice**. Tiered: >= 16 bytes uses 16-byte chunks,
-  8-15 uses two 8-byte copies, 4-7 uses two 4-byte copies, < 4 uses
-  `copy_nonoverlapping`. All paths use `set_len` to skip initialization.
-- **wild_copy_match with offset dispatch**. Five paths by offset: >= 16
-  (non-overlapping 16-byte copies), == 1 (RLE via `write_bytes`), 8-15
-  (overlapping 8-byte copies), 2-7 (pattern stamping via
-  `build_pattern_u64`).
-- **build_pattern_u64**. Builds an 8-byte repeating pattern from `offset`
-  source bytes without reading uninitialized memory.
+- **Sequence copies** (`SeqOut`, `Dst`). Literals copy 16 bytes
+  unconditionally, then 32-byte chunks. Matches with offsets of 32 or more
+  copy 32-byte chunks, offsets of 16 to 31 copy 16-byte chunks, and shorter
+  offsets spread the period to a distance of at least eight the C zstd way
+  (`ZSTD_overlapCopy8`, `spread_match`) before copying 8-byte chunks. Each
+  chunk is read whole before it is written. A copy may write up to 31 bytes
+  past its sequence, inside the reserved overlength.
+- **Single-sequence blocks** (`BlockOutput`). Tiered copies:
+  `wild_copy_match_single_unchecked` for wide offsets, offset 1 via
+  `write_bytes`, 8-15 via 8-byte copies, and 2-7 via pattern stamping
+  (`build_pattern_u64`).
 
-Under `paranoid`, these fall back to `extend_from_slice` and
-`extend_from_within`.
+Under `paranoid`, `SeqOut` zeroes each block's room and runs the same chunked
+copies on an initialized slice; `BlockOutput` falls back to
+`extend_from_slice` and `extend_from_within`.
 
 
 ## CPU feature dispatch
@@ -519,8 +554,9 @@ the decoder gets full SIMD multiversioning under paranoid. What changes:
 - Encoder and core `primitives.rs` switch to safe alternatives via dual
   `#[cfg(feature = "paranoid")]` / `#[cfg(not(feature = "paranoid"))]` bodies:
   direct indexing, `from_le_bytes`, `resize` in place of unchecked operations.
-- Decoder wild-copy (`fast_vec.rs`) falls back to `extend_from_slice` and
-  `extend_from_within`.
+- Decoder sequence copies (`fast_vec.rs`) zero each block's output room and
+  copy within an initialized slice; single-sequence blocks fall back to
+  `extend_from_slice` and `extend_from_within`.
 - Huffman BMI2 `#[target_feature]` dispatch is gated out (uses `unsafe` call).
 
 

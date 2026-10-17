@@ -8,7 +8,9 @@ use alloc::vec::Vec;
 use super::primitives;
 use crate::bitstream::reader_reverse::ReverseBitReader;
 use crate::error::DecompressError;
-use crate::huffman::{HuffmanDecodeEntry, MAX_TABLE_LOG};
+use crate::huffman::{
+    DECODE_TABLE_SIZE, HuffmanDecodeEntry, MAX_TABLE_LOG, PAIR_TABLE_LOG, PAIR_TABLE_SIZE,
+};
 
 pub fn decode_single_stream(
     table: &[HuffmanDecodeEntry],
@@ -107,13 +109,129 @@ pub fn decode_4_streams(
 ) -> Result<Vec<u8>, DecompressError> {
     validate_decode_table(table, table_log)?;
     let mut output = vec![0u8; output_size];
-    decode_4_streams_core_safe(table, table_log, data, output_size, &mut output)?;
+    decode_4_streams_core_safe(table, table_log, None, data, output_size, &mut output)?;
     Ok(output)
 }
 
 pub fn decode_4_streams_into(
     table: &[HuffmanDecodeEntry],
     table_log: u8,
+    data: &[u8],
+    output_size: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), DecompressError> {
+    decode_4_streams_with(table, table_log, None, data, output_size, output)
+}
+
+/// [`decode_4_streams_into`] with a two-symbol table from
+/// [`build_pair_table`] for the same tree: the fast loop decodes up to two
+/// symbols per lookup. Streams still end on the single-symbol table.
+pub fn decode_4_streams_pairs_into(
+    table: &[HuffmanDecodeEntry],
+    table_log: u8,
+    pairs: &[u32],
+    data: &[u8],
+    output_size: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), DecompressError> {
+    let pairs: &[u32; PAIR_TABLE_SIZE] = pairs
+        .first_chunk()
+        .ok_or(DecompressError::BadHuffmanStream)?;
+    decode_4_streams_with(table, table_log, Some(pairs), data, output_size, output)
+}
+
+/// The reference decoder's timing model (`algoTime`): per compression-ratio
+/// bucket, the table build and per-256-symbol decode times of the
+/// single-symbol and the two-symbol decoder.
+const ALGO_TIME: [[(u32, u32); 2]; 16] = [
+    [(0, 0), (1, 1)],
+    [(0, 0), (1, 1)],
+    [(150, 216), (381, 119)],
+    [(170, 205), (514, 112)],
+    [(177, 199), (539, 110)],
+    [(197, 194), (644, 107)],
+    [(221, 192), (735, 107)],
+    [(256, 189), (881, 106)],
+    [(359, 188), (1167, 109)],
+    [(582, 187), (1570, 114)],
+    [(688, 187), (1712, 122)],
+    [(825, 186), (1965, 136)],
+    [(976, 185), (2131, 150)],
+    [(1180, 186), (2070, 175)],
+    [(1377, 185), (1731, 202)],
+    [(1412, 185), (1695, 202)],
+];
+
+/// Whether the two-symbol decoder is expected to be faster for `literals`
+/// symbols in `compressed` bytes.
+///
+/// C zstd's timing model (`HUF_selectDecoder`) decides, but only for sections
+/// of at most five bits per symbol: with longer codes few pairs fit in an
+/// 11-bit lookup, and the single-symbol loop is faster (measured on the
+/// Silesia corpus at level 1, where text gains up to 6% and high-entropy
+/// literals lose up to 20% without this limit).
+pub fn prefers_pairs(literals: usize, compressed: usize) -> bool {
+    if compressed * 8 > literals * 5 {
+        return false;
+    }
+    let bucket = if compressed >= literals {
+        15
+    } else {
+        compressed * 16 / literals
+    };
+    let blocks = (literals >> 8) as u32;
+    let [single, pair] = ALGO_TIME[bucket];
+    let single = single.0 + single.1 * blocks;
+    let pair = pair.0 + pair.1 * blocks;
+    pair + (pair >> 5) < single
+}
+
+/// Packs a two-symbol row: the symbols in the low 16 bits, first one in the
+/// low byte, the bits they take in the next byte, and their count in the top
+/// byte.
+#[inline(always)]
+const fn pair_row(symbols: u32, nb_bits: u32, count: u32) -> u32 {
+    symbols | (nb_bits << 16) | (count << 24)
+}
+
+/// Builds the two-symbol table of an 11-bit lookup (C zstd's `HUF_DEltX2`)
+/// from a single-symbol table: each row decodes the code at the top of its
+/// index and, when both fit in 11 bits, the code after it. Decoding with it
+/// reads exactly the bits the single-symbol table reads for those symbols.
+pub fn build_pair_table(
+    table: &[HuffmanDecodeEntry],
+    table_log: u8,
+    pairs: &mut Vec<u32>,
+) -> Result<(), DecompressError> {
+    validate_decode_table(table, table_log)?;
+    let table: &[HuffmanDecodeEntry; DECODE_TABLE_SIZE] = table
+        .first_chunk()
+        .ok_or(DecompressError::BadHuffmanStream)?;
+    pairs.resize(PAIR_TABLE_SIZE, 0);
+    let down = u32::from(PAIR_TABLE_LOG - table_log);
+    let mask = PAIR_TABLE_SIZE - 1;
+    for (index, row) in pairs[..PAIR_TABLE_SIZE].iter_mut().enumerate() {
+        let first = table[(index >> down) & (DECODE_TABLE_SIZE - 1)];
+        let first_bits = u32::from(first.num_bits) & 15;
+        let second = table[((index << first_bits) & mask) >> down];
+        let second_bits = u32::from(second.num_bits);
+        *row = if first_bits + second_bits <= u32::from(PAIR_TABLE_LOG) {
+            pair_row(
+                u32::from(first.symbol) | (u32::from(second.symbol) << 8),
+                first_bits + second_bits,
+                2,
+            )
+        } else {
+            pair_row(u32::from(first.symbol), first_bits, 1)
+        };
+    }
+    Ok(())
+}
+
+fn decode_4_streams_with(
+    table: &[HuffmanDecodeEntry],
+    table_log: u8,
+    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
     data: &[u8],
     output_size: usize,
     output: &mut Vec<u8>,
@@ -128,6 +246,7 @@ pub fn decode_4_streams_into(
                 super::decode_4stream::decode_4_streams_core_bmi2_safe(
                     table,
                     table_log,
+                    pairs,
                     data,
                     output_size,
                     output,
@@ -139,7 +258,7 @@ pub fn decode_4_streams_into(
             return result;
         }
     }
-    let result = decode_4_streams_core_safe(table, table_log, data, output_size, output);
+    let result = decode_4_streams_core_safe(table, table_log, pairs, data, output_size, output);
     if result.is_err() {
         output.clear();
     }
@@ -162,11 +281,12 @@ fn validate_decode_table(
 fn decode_4_streams_core_safe(
     table: &[HuffmanDecodeEntry],
     table_log: u8,
+    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
     data: &[u8],
     output_size: usize,
     output: &mut [u8],
 ) -> Result<(), DecompressError> {
-    super::decode_4stream::decode_4_streams_core(table, table_log, data, output_size, output)
+    super::decode_4stream::decode_4_streams_core(table, table_log, pairs, data, output_size, output)
 }
 
 #[inline(always)]
@@ -451,6 +571,17 @@ mod tests {
                     .map(|p| p.concat());
                 let mut out = Vec::new();
                 let result = decode_4_streams_into(&table, log, &data, size, &mut out);
+                // The two-symbol table decodes the same symbols and rejects
+                // the same streams.
+                let mut pairs = Vec::new();
+                build_pair_table(&table, log, &mut pairs).unwrap();
+                let mut out_pairs = Vec::new();
+                let result_pairs =
+                    decode_4_streams_pairs_into(&table, log, &pairs, &data, size, &mut out_pairs);
+                assert_eq!(result.is_ok(), result_pairs.is_ok(), "corrupt {corrupt}");
+                if result.is_ok() {
+                    assert_eq!(out_pairs, out, "corrupt {corrupt}");
+                }
                 match (expected, result) {
                     (Ok(expected), Ok(())) => {
                         assert_eq!(out, expected);
@@ -465,6 +596,13 @@ mod tests {
             }
         }
         assert!(ok > 1500 && err > 500, "ok {ok}, err {err}");
+    }
+
+    #[test]
+    fn the_timing_model_prefers_pairs_for_well_compressed_large_sections() {
+        assert!(prefers_pairs(100_000, 30_000));
+        assert!(!prefers_pairs(100, 99));
+        assert!(!prefers_pairs(1_000, 2_000));
     }
 
     #[test]
