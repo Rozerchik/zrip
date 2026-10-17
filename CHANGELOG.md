@@ -18,6 +18,18 @@
   - Matches with offsets below 8 are copied eight bytes at a time.
 - Literal sections of at most five bits per symbol decode with a
   two-symbol Huffman table.
+- Faster encoding with better ratios at levels -8 to 2: 6-12% faster on the
+  Silesia corpus, with output 0.9-2.3% smaller. Levels 3 and 4 compress 1.7%
+  smaller.
+  - Backward match extension may reach into earlier blocks, as in C zstd.
+  - The Fast match finder no longer prefetches its hash table.
+  - Sequence packing counts code frequencies in the same pass, and the
+    sequence encoder flushes its bits once per sequence.
+  - The content checksum hashes each block right after compressing it,
+    while its bytes are still in cache.
+- The encoder checks a block for incompressible bytes at eight places
+  instead of its first 1 KiB, using C zstd's bound. Literals above 7.97
+  bits per byte stay raw without building a Huffman table.
 
 ### Fixed
 

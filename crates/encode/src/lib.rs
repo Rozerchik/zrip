@@ -199,24 +199,36 @@ pub(crate) fn skip_match_search(
     !strategy::keeps_raw_literals(params, input_len) && block_looks_incompressible(data)
 }
 
+/// Whether `data` looks as flat as random bytes.
+///
+/// Samples eight 512-byte windows spread over the block and applies C zstd's
+/// Huffman bound: no byte value may occur much more than 1/128 of the time.
+/// A single window at the start would miss compressible data later in the
+/// block.
 fn block_looks_incompressible(data: &[u8]) -> bool {
-    const SAMPLE: usize = 1024;
-    const DISTINCT_THRESHOLD: u32 = 200;
-    const MAX_FREQ_DENOM: u32 = 24;
-    if data.len() < SAMPLE {
+    const WINDOWS: usize = 8;
+    const WINDOW: usize = 512;
+    if data.len() < WINDOWS * WINDOW {
         return false;
     }
-    let mut counts = [0u16; 256];
-    for &b in &data[..SAMPLE] {
-        counts[b as usize] += 1;
+    // Four interleaved tables, so runs of one byte value do not serialize on
+    // a single counter.
+    let mut counts = [[0u16; 256]; 4];
+    for w in 0..WINDOWS {
+        let start = data.len() * w / WINDOWS;
+        let (chunks, _) = data[start..start + WINDOW].as_chunks::<4>();
+        for c in chunks {
+            counts[0][c[0] as usize] += 1;
+            counts[1][c[1] as usize] += 1;
+            counts[2][c[2] as usize] += 1;
+            counts[3][c[3] as usize] += 1;
+        }
     }
-    let mut distinct: u32 = 0;
-    let mut max_freq: u16 = 0;
-    for &c in &counts {
-        distinct += (c > 0) as u32;
-        max_freq = max_freq.max(c);
-    }
-    distinct >= DISTINCT_THRESHOLD && (max_freq as u32) <= SAMPLE as u32 / MAX_FREQ_DENOM
+    let largest = (0..256)
+        .map(|i| usize::from(counts[0][i] + counts[1][i] + counts[2][i] + counts[3][i]))
+        .max()
+        .unwrap();
+    largest <= ((WINDOWS * WINDOW) >> 7) + 4
 }
 
 pub(crate) fn clamp_params_to_src_size(params: &mut strategy::LevelParams, src_len: usize) {

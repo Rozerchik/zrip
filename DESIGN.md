@@ -18,19 +18,24 @@ Rep2 post-match chaining (`rep2_match_loop`): after any match, immediately
 checks `rep_offset2` for consecutive rep matches (zero-literal-length
 sequences). Chains matches without re-entering the main loop. 1-byte
 backward extension on rep matches (C zstd style), multi-byte backward
-extension on regular matches.
+extension on regular matches. Backward extension may reach into earlier
+blocks of the window, as in C zstd.
 
 Const-generic dispatch on minimum match length via
 `compress_fast_block_impl::<HASH_LOG, MLS>`:
 
 | MLS | Hash function | Used at levels |
 |-----|---------------|----------------|
-| 4   | `hash4` (PRIME32_1) | 1..2 |
-| 5   | `hash5` (PRIME64_1) | -8..-1 |
+| 4   | `hash4` (PRIME32_1) | custom params only |
+| 5   | `hash5` (PRIME64_1) | custom params only |
+| 6   | `hash6` (PRIME64_1) | -8..2 |
 | 7   | `hash7` (custom PRIME7) | custom params only |
 
-Hash table prefetch on x86_64 (`_mm_prefetch`) and aarch64 (inline asm
-`prfm pldl1keep`) hides memory latency in the match-finding loop.
+MLS 6 also fixes `HASH_LOG` for hash logs 13 to 16, so the hash shift is a
+constant.
+
+The Fast match finder does not prefetch. Its hash tables are 32-256 KiB,
+and prefetching measured 2-4% slower.
 
 Incompressibility bail-out: at probe intervals, if
 `total_match_bytes * 6 < scanned`, the compressor clears sequences and returns
@@ -87,6 +92,13 @@ Huffman coding costs more time than it saves on them. `block_policy` in
 L-1. `encode_literals_section` measures the full
 histogram for up to 4 KiB of literals and a 4 KiB sample for longer runs.
 
+At every level, literals with an order-0 entropy above 7.97 bits per byte
+stay raw: Huffman would save under 0.4%, less than its table costs. When
+literals are long or sequences few (at least 20 literals per sequence), a
+4 KiB sample from each end is checked first, as in C zstd, so incompressible
+literals skip the full histogram. Literals whose best Huffman estimate is not
+smaller than the raw bytes also stay raw.
+
 Small inputs on the negative levels keep all literals raw and use predefined
 sequence tables (`raw_literals_limit`): up to 2 KiB at L-1, growing 1.5x or
 1.33x per level to 24 KiB at L-8. Building a Huffman table costs a few
@@ -116,17 +128,20 @@ savings).
 
 **Pre-packed sequence batch** (`pack_sequences_and_literals`). Pre-computes
 all LL/ML/OF codes, extra bits, and rep-offset resolution into `PackedSeq`
-structs in a single pass. FSE encoding then iterates the packed array without
-recomputing.
+structs in a single pass, counting code frequencies on the way. FSE encoding
+then iterates the packed array without recomputing. It flushes once per
+sequence: at most 30 extra bits fit after the three state transitions, as in
+C zstd, and longer extras flush first.
 
 **SymbolTT encoding scheme.** Two-field per-symbol struct (`delta_nb_bits`,
 `delta_find_state`) encodes variable-width emission and state transition in
 one lookup. ~1.3 KiB total footprint vs ~20 KiB for full tables.
 
-**Incompressibility fast path**: `block_looks_incompressible()` samples the
-first 1024 bytes. Skips compression if >= 200 distinct byte values and max
-frequency < 1/24. Applied before entering the match finder, except on
-inputs that keep raw literals.
+**Incompressibility fast path**: `block_looks_incompressible()` samples
+eight 512-byte windows spread over the block. Skips compression if no byte
+value occurs more than 1/128 of the time plus 4, C zstd's Huffman bound.
+Applied before entering the match finder, except on inputs that keep raw
+literals.
 
 **Fallback**: If the compressed block >= source size, rep offsets are reverted
 and a raw block is emitted.

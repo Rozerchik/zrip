@@ -142,7 +142,43 @@ pub(crate) fn compress_fast_block(
             hash_table,
             sequences,
         ),
-        (6, _) => compress_fast_block_mls6(
+        (6, 13) => compress_fast_block_mls6::<13>(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (6, 14) => compress_fast_block_mls6::<14>(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (6, 15) => compress_fast_block_mls6::<15>(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (6, 16) => compress_fast_block_mls6::<16>(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (6, _) => compress_fast_block_mls6::<0>(
             src,
             block_start,
             block_end,
@@ -225,7 +261,7 @@ fn compress_fast_block_mls4(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-fn compress_fast_block_mls6(
+fn compress_fast_block_mls6<const HASH_LOG: u32>(
     src: &[u8],
     block_start: usize,
     block_end: usize,
@@ -234,7 +270,7 @@ fn compress_fast_block_mls6(
     hash_table: &mut [u32],
     sequences: &mut Vec<Sequence>,
 ) {
-    simd_body!(compress_fast_block_impl::<0, 6>(
+    simd_body!(compress_fast_block_impl::<HASH_LOG, 6>(
         src,
         block_start,
         block_end,
@@ -489,6 +525,7 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
         }
 
         let mut h0 = hash_pos::<HASH_LOG, MLS>(src, ip0, hash_log);
+        let mut h1 = hash_pos::<HASH_LOG, MLS>(src, ip1, hash_log);
         let mut match_idx = hash_load!(hash_table, h0) as usize;
 
         loop {
@@ -506,7 +543,6 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
                     if ip0 > anchor && ip0 > rep1 && src[ip0 - 1] == src[ip0 - rep1 - 1] {
                         ip0 -= 1;
                     }
-                    let h1 = hash_pos::<HASH_LOG, MLS>(src, ip1, hash_log);
                     hash_store!(hash_table, h1, ip1 as u32);
                     let back = ip2 - ip0;
                     let mlen = count_match!(src, ip2 + 4, ip2 - rep1 + 4, block_end) + 4 + back;
@@ -539,19 +575,11 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             }
 
             // First match check at ip0
-            if match_idx < ip0
-                && ip0 - match_idx <= max_distance
-                && fast_match_at::<MLS>(src, ip0, match_idx)
+            if in_window(ip0, match_idx, max_distance) && fast_match_at::<MLS>(src, ip0, match_idx)
             {
-                let h1 = hash_pos::<HASH_LOG, MLS>(src, ip1, hash_log);
                 hash_store!(hash_table, h1, ip1 as u32);
                 let fill_pos = ip0;
-                let back = count_back(
-                    src,
-                    ip0,
-                    match_idx,
-                    (ip0 - anchor).min(match_idx.saturating_sub(block_start)),
-                );
+                let back = count_back(src, ip0, match_idx, (ip0 - anchor).min(match_idx));
                 let match_start = ip0 - back;
                 let offset = (match_start - (match_idx - back)) as u32;
                 let mlen = count_match!(src, ip0 + confirm, match_idx + confirm, block_end)
@@ -586,36 +614,25 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
                 continue 'start;
             }
 
-            // First shift: compute h1 for ip1, reuse as h0
-            let h1 = hash_pos::<HASH_LOG, MLS>(src, ip1, hash_log);
+            // First shift: ip1 becomes ip0, hash ip2 as the new ip1
             match_idx = hash_load!(hash_table, h1) as usize;
             h0 = h1;
-            let h_ip2 = hash_pos::<HASH_LOG, MLS>(src, ip2, hash_log);
+            h1 = hash_pos::<HASH_LOG, MLS>(src, ip2, hash_log);
             ip0 = ip1;
             ip1 = ip2;
             ip2 += 1;
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            primitives::prefetch_ht(hash_table, h_ip2);
 
             // Write hash for shifted ip0
             hash_store!(hash_table, h0, ip0 as u32);
 
             // Second match check at shifted ip0
-            if match_idx < ip0
-                && ip0 - match_idx <= max_distance
-                && fast_match_at::<MLS>(src, ip0, match_idx)
+            if in_window(ip0, match_idx, max_distance) && fast_match_at::<MLS>(src, ip0, match_idx)
             {
                 if step_size + ((ip0 - anchor) >> search_strength) <= 4 {
-                    hash_store!(hash_table, h_ip2, ip1 as u32);
+                    hash_store!(hash_table, h1, ip1 as u32);
                 }
                 let fill_pos = ip0;
-                let back = count_back(
-                    src,
-                    ip0,
-                    match_idx,
-                    (ip0 - anchor).min(match_idx.saturating_sub(block_start)),
-                );
+                let back = count_back(src, ip0, match_idx, (ip0 - anchor).min(match_idx));
                 let match_start = ip0 - back;
                 let offset = (match_start - (match_idx - back)) as u32;
                 let mlen = count_match!(src, ip0 + confirm, match_idx + confirm, block_end)
@@ -651,17 +668,13 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             }
 
             // Second shift with step gap
-            match_idx = hash_load!(hash_table, h_ip2) as usize;
-            h0 = h_ip2;
-            #[allow(unused_variables)]
-            let h_next = hash_pos::<HASH_LOG, MLS>(src, ip2, hash_log);
+            match_idx = hash_load!(hash_table, h1) as usize;
+            h0 = h1;
+            h1 = hash_pos::<HASH_LOG, MLS>(src, ip2, hash_log);
             ip0 = ip1;
             ip1 = ip2;
             let step = step_size + ((ip0 - anchor) >> skip_shift);
             ip2 = ip0 + step;
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            primitives::prefetch_ht(hash_table, h_next);
 
             if unlikely(ip2 + 1 >= ilimit) {
                 break;
@@ -670,6 +683,15 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
 
         break;
     }
+}
+
+/// Whether `idx` is an earlier position at most `max_distance` back from `ip`.
+///
+/// One wrapping compare covers both bounds: `idx >= ip` wraps to a huge
+/// distance.
+#[inline(always)]
+fn in_window(ip: usize, idx: usize, max_distance: usize) -> bool {
+    ip.wrapping_sub(idx).wrapping_sub(1) < max_distance
 }
 
 /// Counts equal bytes backward from `a` and `b` (exclusive), up to `max`.
