@@ -308,7 +308,7 @@ predictor learn it and distorts results. `small_decode.svg` draws each
 implementation decoding C zstd's L3 frames (thick) and its own L3 output
 (thin, from the small encode rows).
 
-`small_encode.svg` includes zrip, C zstd, structured-zstd, and lz4rip.
+`small_encode.svg` includes zrip, C zstd, structured-zstd, mzstd, and lz4rip.
 Default `--small-only` benchmarks zrip only:
 
 ```bash

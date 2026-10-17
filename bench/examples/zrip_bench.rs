@@ -394,6 +394,26 @@ fn bench_structured_zstd(slices: &[&[u8]], name: &str, level: i32, target_ns: u6
     )
 }
 
+fn bench_mzstd(slices: &[&[u8]], name: &str, level: i32, target_ns: u64) -> BenchResult {
+    let config = mzstd::EncoderConfig::default().with_level(mzstd::Level::try_from(level).unwrap());
+    let mut compressor = mzstd::Compressor::new(config).unwrap();
+    let mut decompressor = mzstd::Decompressor::default();
+    let mut buf = Vec::new();
+    bench_slices(
+        "mzstd",
+        slices,
+        name,
+        level,
+        target_ns,
+        |s| compressor.compress(s).unwrap(),
+        |f, len| {
+            buf.clear();
+            buf.reserve(len + 1024);
+            std::hint::black_box(decompressor.decompress_into(f, &mut buf).unwrap());
+        },
+    )
+}
+
 fn bench_c_zstd(slices: &[&[u8]], name: &str, level: i32, target_ns: u64) -> BenchResult {
     let mut compressor = zstd::bulk::Compressor::new(level).unwrap();
     let mut decompressor = zstd::bulk::Decompressor::new().unwrap();
@@ -528,6 +548,15 @@ fn bench_decode_only(
             let mut out = vec![0u8; len + 1024];
             dec.decode_all(f, &mut out).unwrap()
         }),
+        "mzstd" => {
+            let mut decompressor = mzstd::Decompressor::default();
+            let mut buf = Vec::new();
+            run(frames, slices, target_ns, |f, len| {
+                buf.clear();
+                buf.reserve(len + 1024);
+                decompressor.decompress_into(f, &mut buf).unwrap().len()
+            })
+        }
         _ => unreachable!("unsupported codec for decode-only: {}", codec),
     };
     BenchResult {
@@ -884,8 +913,15 @@ fn migrate_flat_cache() {
 
 const ZRIP_CODEC: &str = "zrip";
 
-const CODECS: &[&str] = &["C zstd", ZRIP_CODEC, "ruzstd", "structured-zstd", "lz4rip"];
-const DECODE_CODECS: &[&str] = &["C zstd", ZRIP_CODEC, "ruzstd", "structured-zstd"];
+const CODECS: &[&str] = &[
+    "C zstd",
+    ZRIP_CODEC,
+    "ruzstd",
+    "structured-zstd",
+    "mzstd",
+    "lz4rip",
+];
+const DECODE_CODECS: &[&str] = &["C zstd", ZRIP_CODEC, "ruzstd", "structured-zstd", "mzstd"];
 const DICT_CODECS: &[&str] = &["C zstd+dict", "zrip+dict"];
 
 fn levels_for_codec<'a>(codec: &str, level_filter: &'a [i32]) -> &'a [i32] {
@@ -893,7 +929,7 @@ fn levels_for_codec<'a>(codec: &str, level_filter: &'a [i32]) -> &'a [i32] {
         "ruzstd" | "lz4rip" => &[1],
         _ if !level_filter.is_empty() => level_filter,
         "zrip" | "zrip+dict" => ZRIP_LEVELS,
-        "C zstd" | "C zstd+dict" | "structured-zstd" => C_ZSTD_LEVELS,
+        "C zstd" | "C zstd+dict" | "structured-zstd" | "mzstd" => C_ZSTD_LEVELS,
         _ => &[1],
     }
 }
@@ -1257,6 +1293,7 @@ fn main() {
                         "zrip" => bench_zrip(slices, name, level, target_ns),
                         "ruzstd" => bench_ruzstd(slices, name, level, target_ns),
                         "structured-zstd" => bench_structured_zstd(slices, name, level, target_ns),
+                        "mzstd" => bench_mzstd(slices, name, level, target_ns),
                         "lz4rip" => bench_lz4rip(slices, name, level, target_ns),
                         "zrip+dict" => {
                             if let Some(db) = dict_bytes {
