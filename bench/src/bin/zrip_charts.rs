@@ -26,7 +26,7 @@ const DECODE_LEVEL: i32 = 3;
 const LEVELS: &[i32] = &[3, 1, -1];
 const COLUMN_LEVELS: &[i32] = &[-1, 1, 3];
 const SUMMARY_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
-const BAND_LEVELS: &[i32] = &[-8, -7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
+const BAND_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
 const C_ZSTD_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
 const INTERIOR_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3];
 const LABEL_LEVEL: i32 = -1;
@@ -218,15 +218,9 @@ impl Config {
                     0xf59e0b,
                     0xc47d08,
                 ),
-                codec(
-                    "zrip paranoid",
-                    "zrip paranoid (safe Rust, no unsafe)",
-                    0xf472b6,
-                    0xc05a92,
-                ),
             ];
-            cfg.scatter_codecs = vec!["C zstd", "zrip", "structured-zstd", "zrip paranoid"];
-            cfg.summary_codecs = vec!["C zstd", "zrip", "zrip paranoid", "structured-zstd"];
+            cfg.scatter_codecs = vec!["C zstd", "zrip", "structured-zstd"];
+            cfg.summary_codecs = vec!["C zstd", "zrip", "structured-zstd"];
             cfg.matrix_codecs = cfg.summary_codecs.clone();
             cfg.pipeline_codecs = cfg.summary_codecs.clone();
             cfg.small_codecs = vec!["C zstd", "zrip", "structured-zstd"];
@@ -243,18 +237,7 @@ impl Config {
             hw_label: detect_hardware(),
             codecs: vec![
                 codec("C zstd", "libzstd v1.5.7 (C)", 0x60a5fa, 0x4680c4),
-                codec(
-                    "zrip",
-                    "zrip (safe SIMD + encapsulated unsafe)",
-                    0xf87171,
-                    0xc45050,
-                ),
-                codec(
-                    "zrip paranoid",
-                    "zrip paranoid (safe SIMD, no unsafe)",
-                    0xf472b6,
-                    0xc05a92,
-                ),
+                codec("zrip", "zrip (safe Rust, SIMD)", 0xf87171, 0xc45050),
                 codec(
                     "structured-zstd",
                     "structured-zstd v0.0.55 (unsafe)",
@@ -269,44 +252,12 @@ impl Config {
                     0x9966cc,
                 ),
             ],
-            scatter_codecs: vec![
-                "C zstd",
-                "zrip",
-                "structured-zstd",
-                "zrip paranoid",
-                "ruzstd",
-                "lz4rip",
-            ],
-            summary_codecs: vec![
-                "C zstd",
-                "zrip",
-                "zrip paranoid",
-                "structured-zstd",
-                "ruzstd",
-            ],
-            matrix_codecs: vec![
-                "C zstd",
-                "zrip",
-                "zrip paranoid",
-                "structured-zstd",
-                "ruzstd",
-            ],
-            pipeline_codecs: vec![
-                "C zstd",
-                "zrip",
-                "zrip paranoid",
-                "structured-zstd",
-                "ruzstd",
-            ],
+            scatter_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd", "lz4rip"],
+            summary_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd"],
+            matrix_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd"],
+            pipeline_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd"],
             small_codecs: vec!["C zstd", "zrip", "structured-zstd", "lz4rip"],
-            small_decode_codecs: vec![
-                "C zstd",
-                "zrip",
-                "zrip paranoid",
-                "structured-zstd",
-                "ruzstd",
-                "lz4rip",
-            ],
+            small_decode_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd", "lz4rip"],
         }
     }
 
@@ -484,10 +435,13 @@ fn load_all_data(
             );
         }
     }
+    // Old cache dirs (such as the retired zrip L-8) stay on disk; skip
+    // levels the charts no longer show.
     out.into_iter()
         .map(|(codec, rows)| {
+            let levels = supported_encode_levels(&codec);
             let mut latest = BTreeMap::new();
-            for row in rows {
+            for row in rows.into_iter().filter(|r| levels.contains(&r.level)) {
                 latest.insert((row.input.clone(), row.level), row);
             }
             (codec, latest.into_values().collect())
@@ -669,7 +623,7 @@ fn small_names(suffixes: &[&str]) -> Vec<String> {
 
 fn supported_encode_levels(codec: &str) -> Vec<i32> {
     match codec {
-        "zrip" | "zrip paranoid" => BAND_LEVELS.to_vec(),
+        "zrip" => BAND_LEVELS.to_vec(),
         "C zstd" | "structured-zstd" => C_ZSTD_LEVELS.to_vec(),
         "ruzstd" | "lz4rip" => vec![LEVEL],
         _ => vec![LEVEL],
@@ -723,34 +677,19 @@ where
     Err(format!(
         "{chart_name}: missing {} required Silesia cache rows ({sample}). {}",
         missing.len(),
-        missing_cache_hint(chart_name, &missing),
+        missing_cache_hint(chart_name),
     )
     .into())
 }
 
-fn missing_cache_hint(chart_name: &str, missing: &[String]) -> String {
+fn missing_cache_hint(chart_name: &str) -> String {
     const BENCH: &str = "cargo run --manifest-path bench/Cargo.toml --example zrip_bench --release";
-    let has_paranoid = missing.iter().any(|row| row.starts_with("zrip paranoid "));
-    let only_paranoid = missing.iter().all(|row| row.starts_with("zrip paranoid "));
-
     match chart_name {
         "small encode" => {
             format!("Run `{BENCH} -- --small-only --impl all`.")
         }
-        "small decode" if has_paranoid => {
-            format!(
-                "Run `{BENCH} -- --small-only --decode-only --levels 3`, then \
-                 `{BENCH} --features paranoid -- --small-only --decode-only --levels 3 --impl zrip`."
-            )
-        }
         "small decode" => {
             format!("Run `{BENCH} -- --small-only --decode-only --levels 3`.")
-        }
-        _ if only_paranoid => {
-            format!("Run `{BENCH} --features paranoid`.")
-        }
-        _ if has_paranoid => {
-            format!("Run `{BENCH} -- --impl all`, then `{BENCH} --features paranoid`.")
         }
         _ => {
             format!("Run `{BENCH} -- --impl all`.")
@@ -1848,12 +1787,8 @@ fn compute_scatter_points(
     points
 }
 
-fn should_label_scatter_level(codec: &str, level: i32) -> bool {
-    matches!(level, -1 | 1 | 3)
-        || match codec {
-            "zrip" | "zrip paranoid" => level == -8,
-            _ => level == -7,
-        }
+fn should_label_scatter_level(level: i32) -> bool {
+    matches!(level, -7 | -1 | 1 | 3)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1944,7 +1879,7 @@ fn draw_scatter_panel(
             let sx = clip_x(raw_sx);
             let sy = map_y(y);
             dot(area, sx, sy, 3, style.color)?;
-            if should_label_scatter_level(codec, level) {
+            if should_label_scatter_level(level) {
                 let (label_x, hpos) = if raw_sx > x_right - 28.0 {
                     (sx - 6.0, HPos::Right)
                 } else {
