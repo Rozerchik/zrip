@@ -477,8 +477,20 @@ Const generics eliminate dead code at compile time:
 
 - `compress_fast_block_impl::<HASH_LOG, MLS>`: LLVM specializes per MLS (4, 5, 7),
   dead-code eliminates unused hash/match paths.
-- `compress_dfast_block_impl::<HASH_LOG, SHORT_LOG, MLS>`: same for DFast.
-- `hash_pos::<HASH_LOG, MLS>`: selects hash4/hash5/hash7 at compile time.
+- `compress_dfast_block_impl::<HASH_LOG, SHORT_LOG, MLS>`: same for DFast,
+  with fixed hash logs for L3 (18) and L4 (20).
+- `hash_val::<HASH_LOG, MLS>`: selects hash4/hash5/hash6/hash7 at compile time.
+
+**Paranoid match finders.** A fixed `HASH_LOG` also lets the paranoid build
+index hash tables without checks: `exact_table` cuts each table to exactly
+`1 << HASH_LOG` entries, so the compiler sees every hash in bounds. The finders
+pass the bytes read for hashing to `rd32_again`/`rd64_again`, which the
+paranoid build answers from those bytes instead of reading again. The default
+build reads again: a load is cheaper than keeping the bytes in a register.
+DFast also clamps its reads to `ilimit` (`rd64_upto`), turning two bounds
+checks into a conditional move. The Fast finder keeps checked reads: clamps
+measured 3% slower there, because a conditional move delays the load while a
+predicted check does not.
 - Strategy dispatch (`Fast` vs `DFast`) happens at block boundaries, not
   per-position.
 

@@ -30,6 +30,11 @@
 - The encoder checks a block for incompressible bytes at eight places
   instead of its first 1 KiB, using C zstd's bound. Literals above 7.97
   bits per byte stay raw without building a Huffman table.
+- The `paranoid` build encodes 6-11% faster on the Silesia corpus (2% at
+  level 3), within 1-8% of the default build. Its match finders cut hash
+  tables to their exact size so indexing needs no checks, reuse the bytes
+  read for hashing in match checks, and in DFast clamp reads to a limit the
+  compiler can prove in bounds.
 
 ### Fixed
 
