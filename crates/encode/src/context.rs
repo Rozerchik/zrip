@@ -14,7 +14,7 @@ use zrip_core::dict::Dictionary;
 use zrip_core::error::CompressError;
 use zrip_core::frame::MAX_BLOCK_SIZE;
 use zrip_core::huffman::encode::HuffmanEncodeTable;
-use zrip_core::xxhash::xxh64;
+use zrip_core::xxhash::{Xxh64State, xxh64};
 
 /// Pre-computed dictionary state for hot-loop compression.
 ///
@@ -623,6 +623,11 @@ fn compress_core<S: OutputSink>(
         content_checksum,
     )?;
 
+    // Paths that walk the input block by block hash each block right after
+    // compressing it, while its bytes are still in cache.
+    let mut checksum = content_checksum.then(|| Xxh64State::new(0));
+    let mut hashed_blocks = false;
+
     if input.is_empty() {
         block_encoder::encode_raw_block(&[], true, output)?;
     } else {
@@ -753,8 +758,12 @@ fn compress_core<S: OutputSink>(
                                 )?;
                             }
                         }
+                        if let Some(c) = checksum.as_mut() {
+                            c.update(block);
+                        }
                         offset = block_end;
                     }
+                    hashed_blocks = true;
                 }
             }
             Strategy::DFast => {
@@ -853,17 +862,24 @@ fn compress_core<S: OutputSink>(
                                 strategy::block_policy(&params, input.len()),
                             )?;
                         }
+                        if let Some(c) = checksum.as_mut() {
+                            c.update(block);
+                        }
                         offset = block_end;
                     }
+                    hashed_blocks = true;
                 }
             }
         }
     }
 
-    if content_checksum {
-        let hash = xxh64(input, 0);
-        let checksum = (hash & 0xFFFF_FFFF) as u32;
-        output.extend_from_slice(&checksum.to_le_bytes())?;
+    if let Some(c) = checksum {
+        let hash = if hashed_blocks {
+            c.finish()
+        } else {
+            xxh64(input, 0)
+        };
+        output.extend_from_slice(&((hash & 0xFFFF_FFFF) as u32).to_le_bytes())?;
     }
 
     Ok(())

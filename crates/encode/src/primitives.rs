@@ -10,10 +10,12 @@ pub(crate) unsafe fn rd32(src: &[u8], pos: usize) -> u32 {
     unsafe { (src.as_ptr().add(pos) as *const u32).read_unaligned() }
 }
 
+// Native byte order, like the unaligned reads above, so both builds hash and
+// compare the same bytes.
 #[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd32(src: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes(*src[pos..].first_chunk::<4>().unwrap())
+    u32::from_ne_bytes(*src[pos..].first_chunk::<4>().unwrap())
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -28,7 +30,139 @@ pub(crate) unsafe fn rd64(src: &[u8], pos: usize) -> u64 {
 #[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd64(src: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes(*src[pos..].first_chunk::<8>().unwrap())
+    u64::from_ne_bytes(*src[pos..].first_chunk::<8>().unwrap())
+}
+
+/// `rd64(src, pos)` for a `pos` the caller knows is at most `limit`, where
+/// the compiler sees `limit + 8 <= src.len()`.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) unsafe fn rd64_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
+    debug_assert!(pos <= limit && limit + 8 <= src.len());
+    // SAFETY: pos <= limit and limit + 8 <= src.len().
+    unsafe { rd64(src, pos) }
+}
+
+/// `rd64(src, pos)` for a `pos` the caller knows is at most `limit`, where
+/// the compiler sees `limit + 8 <= src.len()`. Reading at `pos.min(limit)`
+/// turns both bounds checks into one conditional move.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn rd64_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
+    debug_assert!(pos <= limit);
+    rd64(src, pos.min(limit))
+}
+
+/// `rd32(src, pos)` for a `pos` at most `limit`, like `rd64_upto`.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) unsafe fn rd32_upto(src: &[u8], pos: usize, limit: usize) -> u32 {
+    debug_assert!(pos <= limit && limit + 8 <= src.len());
+    // SAFETY: pos <= limit and limit + 8 <= src.len().
+    unsafe { rd32(src, pos) }
+}
+
+/// `rd32(src, pos)` for a `pos` at most `limit`, like `rd64_upto`.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn rd32_upto(src: &[u8], pos: usize, limit: usize) -> u32 {
+    debug_assert!(pos <= limit);
+    rd32(src, pos.min(limit))
+}
+
+/// The first four bytes in memory of eight bytes read with `rd64`, as `rd32`
+/// would read them.
+#[inline(always)]
+pub(crate) fn first4(v: u64) -> u32 {
+    let b = v.to_ne_bytes();
+    u32::from_ne_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Eight bytes at `pos`, read ahead for `rd32_again` and `rd64_again`. This
+/// build reads at those calls instead, so it reads nothing here and keeps no
+/// address in a register until then.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) fn rd64_ahead(_src: &[u8], _pos: usize) -> u64 {
+    0
+}
+
+/// Eight bytes at `pos`, read once for `rd32_again` and `rd64_again`.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn rd64_ahead(src: &[u8], pos: usize) -> u64 {
+    rd64(src, pos)
+}
+
+/// `rd64_ahead` for a `pos` at most `limit`, as in `rd64_upto`.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) fn rd64_ahead_upto(_src: &[u8], _pos: usize, _limit: usize) -> u64 {
+    0
+}
+
+/// `rd64_ahead` for a `pos` at most `limit`, as in `rd64_upto`.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn rd64_ahead_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
+    rd64_upto(src, pos, limit)
+}
+
+/// `rd32(src, pos)`. The paranoid build takes it from `v`, the eight bytes
+/// read there before. This build reads again, which is cheaper than keeping
+/// `v` in a register through the match checks, and ignores `v`.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) unsafe fn rd32_again(src: &[u8], pos: usize, _v: u64) -> u32 {
+    // SAFETY: The caller read eight bytes at pos, so four are in bounds.
+    unsafe { rd32(src, pos) }
+}
+
+/// `rd32(src, pos)` where `v` holds `rd64(src, pos)`, taken from `v` to skip
+/// a bounds check.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn rd32_again(_src: &[u8], _pos: usize, v: u64) -> u32 {
+    first4(v)
+}
+
+/// `rd64(src, pos)`. This build reads again and ignores `v`, like
+/// `rd32_again`.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) unsafe fn rd64_again(src: &[u8], pos: usize, _v: u64) -> u64 {
+    // SAFETY: The caller read eight bytes at pos before.
+    unsafe { rd64(src, pos) }
+}
+
+/// `rd64(src, pos)` where `v` already holds it, returned to skip a bounds
+/// check.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn rd64_again(_src: &[u8], _pos: usize, v: u64) -> u64 {
+    v
+}
+
+/// `table` cut to exactly `1 << LOG` entries when `LOG` is a constant, so
+/// the compiler sees that a `LOG`-bit hash indexes in bounds and drops the
+/// checks of safe indexing. This build indexes unchecked and keeps `table`.
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+pub(crate) fn exact_table<const LOG: u32>(table: &mut [u32]) -> &mut [u32] {
+    table
+}
+
+/// `table` cut to exactly `1 << LOG` entries when `LOG` is a constant, so
+/// the compiler sees that a `LOG`-bit hash indexes in bounds and drops the
+/// checks of safe indexing.
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+pub(crate) fn exact_table<const LOG: u32>(table: &mut [u32]) -> &mut [u32] {
+    if LOG != 0 {
+        &mut table[..1 << LOG]
+    } else {
+        table
+    }
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -57,37 +191,6 @@ pub(crate) unsafe fn hash_store(table: &mut [u32], idx: usize, val: u32) {
 #[inline(always)]
 pub(crate) fn hash_store(table: &mut [u32], idx: usize, val: u32) {
     table[idx] = val;
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn match_at<const MLS: usize>(src: &[u8], a: usize, b: usize) -> bool {
-    if MLS >= 7 {
-        // SAFETY: The caller guarantees both reads are in bounds.
-        unsafe { rd64(src, a) == rd64(src, b) }
-    } else if MLS >= 5 {
-        // SAFETY: The caller guarantees both reads are in bounds.
-        let va = unsafe { rd64(src, a) };
-        let vb = unsafe { rd64(src, b) };
-        ((va ^ vb) << (64 - 8 * MLS)) == 0
-    } else {
-        // SAFETY: The caller guarantees both reads are in bounds.
-        unsafe { rd32(src, a) == rd32(src, b) }
-    }
-}
-
-#[cfg(feature = "paranoid")]
-#[inline(always)]
-pub(crate) fn match_at<const MLS: usize>(src: &[u8], a: usize, b: usize) -> bool {
-    if MLS >= 7 {
-        rd64(src, a) == rd64(src, b)
-    } else if MLS >= 5 {
-        let va = rd64(src, a);
-        let vb = rd64(src, b);
-        ((va ^ vb) << (64 - 8 * MLS)) == 0
-    } else {
-        rd32(src, a) == rd32(src, b)
-    }
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -150,24 +253,22 @@ unsafe fn count_match_raw(
 pub(crate) fn count_match(src: &[u8], p1: usize, p2: usize, limit: usize) -> usize {
     debug_assert!(p1 <= limit && limit <= src.len());
     debug_assert!(p2 < p1, "match position must be behind cursor");
-    let max_len = limit - p1;
+    // Two equal-length slices up front, so the chunk loop needs no checks.
+    let a = &src[p1..limit];
+    let b = &src[p2..][..a.len()];
     let mut i = 0;
-    while i + 8 <= max_len {
-        let a = u64::from_le_bytes(*src[p1 + i..].first_chunk::<8>().unwrap());
-        let b = u64::from_le_bytes(*src[p2 + i..].first_chunk::<8>().unwrap());
-        let diff = a ^ b;
+    for (ca, cb) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        let diff = u64::from_le_bytes(*ca) ^ u64::from_le_bytes(*cb);
         if diff != 0 {
             return i + (diff.trailing_zeros() >> 3) as usize;
         }
         i += 8;
     }
-    while i < max_len {
-        if src[p1 + i] != src[p2 + i] {
-            break;
-        }
-        i += 1;
-    }
-    i
+    i + a[i..]
+        .iter()
+        .zip(&b[i..])
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 #[inline(always)]

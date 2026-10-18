@@ -18,19 +18,24 @@ Rep2 post-match chaining (`rep2_match_loop`): after any match, immediately
 checks `rep_offset2` for consecutive rep matches (zero-literal-length
 sequences). Chains matches without re-entering the main loop. 1-byte
 backward extension on rep matches (C zstd style), multi-byte backward
-extension on regular matches.
+extension on regular matches. Backward extension may reach into earlier
+blocks of the window, as in C zstd.
 
 Const-generic dispatch on minimum match length via
 `compress_fast_block_impl::<HASH_LOG, MLS>`:
 
 | MLS | Hash function | Used at levels |
 |-----|---------------|----------------|
-| 4   | `hash4` (PRIME32_1) | 1..2 |
-| 5   | `hash5` (PRIME64_1) | -8..-1 |
+| 4   | `hash4` (PRIME32_1) | custom params only |
+| 5   | `hash5` (PRIME64_1) | custom params only |
+| 6   | `hash6` (PRIME64_1) | -8..2 |
 | 7   | `hash7` (custom PRIME7) | custom params only |
 
-Hash table prefetch on x86_64 (`_mm_prefetch`) and aarch64 (inline asm
-`prfm pldl1keep`) hides memory latency in the match-finding loop.
+MLS 6 also fixes `HASH_LOG` for hash logs 13 to 16, so the hash shift is a
+constant.
+
+The Fast match finder does not prefetch. Its hash tables are 32-256 KiB,
+and prefetching measured 2-4% slower.
 
 Incompressibility bail-out: at probe intervals, if
 `total_match_bytes * 6 < scanned`, the compressor clears sequences and returns
@@ -87,6 +92,13 @@ Huffman coding costs more time than it saves on them. `block_policy` in
 L-1. `encode_literals_section` measures the full
 histogram for up to 4 KiB of literals and a 4 KiB sample for longer runs.
 
+At every level, literals with an order-0 entropy above 7.97 bits per byte
+stay raw: Huffman would save under 0.4%, less than its table costs. When
+literals are long or sequences few (at least 20 literals per sequence), a
+4 KiB sample from each end is checked first, as in C zstd, so incompressible
+literals skip the full histogram. Literals whose best Huffman estimate is not
+smaller than the raw bytes also stay raw.
+
 Small inputs on the negative levels keep all literals raw and use predefined
 sequence tables (`raw_literals_limit`): up to 2 KiB at L-1, growing 1.5x or
 1.33x per level to 24 KiB at L-8. Building a Huffman table costs a few
@@ -116,17 +128,20 @@ savings).
 
 **Pre-packed sequence batch** (`pack_sequences_and_literals`). Pre-computes
 all LL/ML/OF codes, extra bits, and rep-offset resolution into `PackedSeq`
-structs in a single pass. FSE encoding then iterates the packed array without
-recomputing.
+structs in a single pass, counting code frequencies on the way. FSE encoding
+then iterates the packed array without recomputing. It flushes once per
+sequence: at most 30 extra bits fit after the three state transitions, as in
+C zstd, and longer extras flush first.
 
 **SymbolTT encoding scheme.** Two-field per-symbol struct (`delta_nb_bits`,
 `delta_find_state`) encodes variable-width emission and state transition in
 one lookup. ~1.3 KiB total footprint vs ~20 KiB for full tables.
 
-**Incompressibility fast path**: `block_looks_incompressible()` samples the
-first 1024 bytes. Skips compression if >= 200 distinct byte values and max
-frequency < 1/24. Applied before entering the match finder, except on
-inputs that keep raw literals.
+**Incompressibility fast path**: `block_looks_incompressible()` samples
+eight 512-byte windows spread over the block. Skips compression if no byte
+value occurs more than 1/128 of the time plus 4, C zstd's Huffman bound.
+Applied before entering the match finder, except on inputs that keep raw
+literals.
 
 **Fallback**: If the compressed block >= source size, rep offsets are reverted
 and a raw block is emitted.
@@ -299,28 +314,48 @@ Enable via `Options::ldm(true)` (requires the `ldm` feature, on by default).
 
 ### Sequence execution (`crates/decode/src/exec.rs`)
 
-`#![forbid(unsafe_code)]`. A single safe Rust implementation handles all
-platforms. `SeqTable` stores fixed-size 512-entry FSE sequence tables indexed
-with `state & 511`. In default builds the backing storage is
-`[MaybeUninit<FseSeqDecodeEntry>; 512]`, so table promotion initializes only
-the states that the FSE accuracy log can reach. The hot loop copies each
-`FseSeqDecodeEntry` out of the table, letting LLVM keep fields in registers.
-Under `paranoid`, `SeqTable` uses fully initialized
-`[FseSeqDecodeEntry; 512]` storage and the hot loop borrows entries by
-reference to avoid copying initialized padding-heavy structs.
+`#![forbid(unsafe_code)]` under `paranoid`; the copies it calls live in
+`fast_vec.rs`. One safe Rust loop handles all platforms, shaped after C
+zstd's `ZSTD_decompressSequences_body`:
 
-2-sequence unrolled decode loop: decodes 2 sequences per iteration while the
-bit buffer has >= 16 bytes remaining. Cuts loop overhead in half.
+- **Bit reader.** `SeqBits` counts unread bits in a 64-bit container, so a
+  read is one shift and one `bzhi`. It is a small `Copy` value that takes
+  the stream on each refill, so it stays in registers. The loop refills once
+  per sequence, after the state update, and once more only when a
+  sequence's extra bits exceed 31 (`MID_RELOAD_THRESHOLD`). Reads past the
+  stream's start make the unread count wrap, and the end check rejects the
+  stream, as C's `BIT_endOfDStream` does.
+- **Rows.** `SeqEntry` holds the next state's base and bit count and the
+  value's baseline and extra-bit count. Both counts are a 32-variant
+  `#[repr(u8)]` enum (`BitCount`): its range reaches LLVM with every load,
+  so the `bzhi` needs no `& 63`. The loop copies each row out. Holding
+  references instead made LLVM move the state updates across the loop's back
+  edge and spill them.
+- **Output.** `SeqOut` moves the caller's `Vec` into a local for the block,
+  so its pointer and length stay in registers. Behind a `&mut Vec`, every
+  byte store may alias the vector's header, and each copy reloaded and stored
+  the length. The cold path takes the buffer and positions as values, so no
+  `&mut SeqOut` leaves the hot loop. `SeqOut::new` reserves the block's
+  maximum plus `WILDCOPY_OVERLENGTH` bytes; the length is set once, at the
+  end.
+- **Checks.** The fast path makes three tests: the block's limit, whether the
+  literal run ends at least `LITERAL_OVERREAD` (32) bytes before the end of
+  its readable bytes, and the offset. Everything else (literal overruns,
+  matches into a dictionary's history, invalid offsets, runs near the end of
+  the literals) goes to the `#[cold]` `execute_exact`, which checks in the
+  original error order.
+- **Literals.** `decode_literals_ws` leaves 32 zero bytes after the literals
+  it decodes into the workspace, and borrows raw literals in place when the
+  block holds 32 more bytes after them, so literal copies need no
+  length-dependent branches.
 
-Pre-allocated output buffer: reserves `MAX_BLOCK_SIZE + 64` bytes upfront so
-wild copies never trigger reallocation.
+The last sequence of a block is peeled off, so the loop never tests for it.
 
-Literal copies and match copies use wild-copy functions in `fast_vec.rs`
+Literal copies and match copies use the chunked copies in `fast_vec.rs`
 (see [Wild copies](#wild-copies) below).
 
 `fearless_simd::dispatch!` compiles the function with platform target features,
-enabling the compiler to generate BMI2 bit extraction instructions (`shlx`,
-`shrx`) and auto-vectorize bitstream operations.
+enabling BMI2 bit extraction (`shlx`, `shrx`, `bzhi`).
 
 
 ### FSE tables
@@ -343,6 +378,9 @@ predefined tables in `std` builds. Built once, then `SeqTable`-cloned per use.
 
 
 ### Bitstream (`crates/core/src/bitstream/reader_reverse.rs`)
+
+Used by the Huffman decoders, the table readers and blocks with a single
+sequence. Blocks with more sequences use `SeqBits` (see above).
 
 **bitsConsumed model.** Tracks consumed bits instead of available bits.
 Peek uses `(container << consumed) >> (64 - n)` (2 ops) vs the 3-op
@@ -377,28 +415,40 @@ Slow path finishes remaining symbols one stream at a time near exhaustion.
 Treeless block reuse: `huf_valid` flag allows treeless literal blocks to reuse
 the previous Huffman decode table with no re-parse or rebuild.
 
-Literal buffer padding: appends 32 zero bytes past literal data. Enables
-unconditional SIMD loads in the sequence decode loop without bounds checks.
+**Two-symbol tables** (`build_pair_table`, `decode_4_streams_pairs_into`).
+For literal sections of at most five bits per symbol, the fast loop reads an
+11-bit table whose rows decode one or two symbols (C zstd's `HUF_DEltX2`).
+The table is built from the single-symbol rows and rebuilt only after a new
+tree. Each lookup stores both bytes of its row and advances by its symbol
+count; one bounds check covers a round's 10-byte output window.
+`prefers_pairs` applies C's timing model (`HUF_selectDecoder`) under that
+five-bit limit: with longer codes few pairs fit in 11 bits, and the
+single-symbol loop is faster. Every stream ends on the single-symbol table.
+
+Literal buffer padding: decoded literals are followed by 32 zero bytes, and
+raw literals are read in place when the block holds 32 more bytes after
+them, so the sequence loop copies literals in whole chunks.
 
 
 ### Wild copies (`crates/decode/src/fast_vec.rs`)
 
 All unsafe gated by `#[cfg(not(feature = "paranoid"))]`.
 
-- **16-byte chunk copy** (`copy_16`). Two unaligned u64 load/stores for
-  literal and match copies.
-- **fast_extend_from_slice**. Tiered: >= 16 bytes uses 16-byte chunks,
-  8-15 uses two 8-byte copies, 4-7 uses two 4-byte copies, < 4 uses
-  `copy_nonoverlapping`. All paths use `set_len` to skip initialization.
-- **wild_copy_match with offset dispatch**. Five paths by offset: >= 16
-  (non-overlapping 16-byte copies), == 1 (RLE via `write_bytes`), 8-15
-  (overlapping 8-byte copies), 2-7 (pattern stamping via
-  `build_pattern_u64`).
-- **build_pattern_u64**. Builds an 8-byte repeating pattern from `offset`
-  source bytes without reading uninitialized memory.
+- **Sequence copies** (`SeqOut`, `Dst`). Literals copy 16 bytes
+  unconditionally, then 32-byte chunks. Matches with offsets of 32 or more
+  copy 32-byte chunks, offsets of 16 to 31 copy 16-byte chunks, and shorter
+  offsets spread the period to a distance of at least eight the C zstd way
+  (`ZSTD_overlapCopy8`, `spread_match`) before copying 8-byte chunks. Each
+  chunk is read whole before it is written. A copy may write up to 31 bytes
+  past its sequence, inside the reserved overlength.
+- **Single-sequence blocks** (`BlockOutput`). Tiered copies:
+  `wild_copy_match_single_unchecked` for wide offsets, offset 1 via
+  `write_bytes`, 8-15 via 8-byte copies, and 2-7 via pattern stamping
+  (`build_pattern_u64`).
 
-Under `paranoid`, these fall back to `extend_from_slice` and
-`extend_from_within`.
+Under `paranoid`, `SeqOut` zeroes each block's room and runs the same chunked
+copies on an initialized slice; `BlockOutput` falls back to
+`extend_from_slice` and `extend_from_within`.
 
 
 ## CPU feature dispatch
@@ -427,8 +477,20 @@ Const generics eliminate dead code at compile time:
 
 - `compress_fast_block_impl::<HASH_LOG, MLS>`: LLVM specializes per MLS (4, 5, 7),
   dead-code eliminates unused hash/match paths.
-- `compress_dfast_block_impl::<HASH_LOG, SHORT_LOG, MLS>`: same for DFast.
-- `hash_pos::<HASH_LOG, MLS>`: selects hash4/hash5/hash7 at compile time.
+- `compress_dfast_block_impl::<HASH_LOG, SHORT_LOG, MLS>`: same for DFast,
+  with fixed hash logs for L3 (18) and L4 (20).
+- `hash_val::<HASH_LOG, MLS>`: selects hash4/hash5/hash6/hash7 at compile time.
+
+**Paranoid match finders.** A fixed `HASH_LOG` also lets the paranoid build
+index hash tables without checks: `exact_table` cuts each table to exactly
+`1 << HASH_LOG` entries, so the compiler sees every hash in bounds. The finders
+pass the bytes read for hashing to `rd32_again`/`rd64_again`, which the
+paranoid build answers from those bytes instead of reading again. The default
+build reads again: a load is cheaper than keeping the bytes in a register.
+DFast also clamps its reads to `ilimit` (`rd64_upto`), turning two bounds
+checks into a conditional move. The Fast finder keeps checked reads: clamps
+measured 3% slower there, because a conditional move delays the load while a
+predicted check does not.
 - Strategy dispatch (`Fast` vs `DFast`) happens at block boundaries, not
   per-position.
 
@@ -519,8 +581,9 @@ the decoder gets full SIMD multiversioning under paranoid. What changes:
 - Encoder and core `primitives.rs` switch to safe alternatives via dual
   `#[cfg(feature = "paranoid")]` / `#[cfg(not(feature = "paranoid"))]` bodies:
   direct indexing, `from_le_bytes`, `resize` in place of unchecked operations.
-- Decoder wild-copy (`fast_vec.rs`) falls back to `extend_from_slice` and
-  `extend_from_within`.
+- Decoder sequence copies (`fast_vec.rs`) zero each block's output room and
+  copy within an initialized slice; single-sequence blocks fall back to
+  `extend_from_slice` and `extend_from_within`.
 - Huffman BMI2 `#[target_feature]` dispatch is gated out (uses `unsafe` call).
 
 

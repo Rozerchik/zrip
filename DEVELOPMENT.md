@@ -117,7 +117,7 @@ Sixteen proof harnesses across two crates:
   proof that `BlockOutput::new` reserves sufficient capacity for all wildcopy
   variants, plus per-primitive proofs for `build_pattern_u64`,
   `fast_extend_from_ptr`, `wild_copy_match_unchecked` (four offset tiers),
-  `wild_copy_match_16plus_unchecked`, and `wild_copy_match_single_unchecked`
+  `spread_match` (offsets below 16), and `wild_copy_match_single_unchecked`
   (three dispatch paths).
 
 - **Encoder** (`crates/encode/src/primitives.rs`, 5 harnesses): `rd32`,

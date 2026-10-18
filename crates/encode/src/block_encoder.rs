@@ -16,6 +16,34 @@ use zrip_core::fse::{
 };
 use zrip_core::huffman::encode::{HuffmanEncodeTable, byte_histogram};
 
+/// Defines `$name!(p)`, which appends the extra bits of packed sequence `p`
+/// after its three state transitions.
+///
+/// At most 7 + 26 bits are pending after the transitions, so up to 30 extra
+/// bits fit without a flush, as in C zstd. Longer extras flush first, and
+/// more than 56 (a long literal run, a long match, and a far offset in one
+/// sequence) go in two parts, so the container never holds 64 bits.
+macro_rules! add_extra_bits_macro {
+    ($name:ident, $add_bits:ident, $flush:ident) => {
+        macro_rules! $name {
+            ($p:expr) => {
+                if $p.extra_nbits <= 30 {
+                    $add_bits!($p.extra_bits, $p.extra_nbits);
+                } else {
+                    $flush!();
+                    if $p.extra_nbits <= 56 {
+                        $add_bits!($p.extra_bits, $p.extra_nbits);
+                    } else {
+                        $add_bits!($p.extra_bits & 0xFFFF_FFFF, 32);
+                        $flush!();
+                        $add_bits!($p.extra_bits >> 32, $p.extra_nbits - 32);
+                    }
+                }
+            };
+        }
+    };
+}
+
 #[inline]
 fn write_seq_count(output: &mut Vec<u8>, num_seq: u32) {
     if num_seq < 128 {
@@ -40,8 +68,32 @@ struct PackedSeq {
     extra_nbits: u8,
 }
 
+/// Code counts of the last packed block, counted while packing. The tables
+/// have 64 slots so the counting needs no bounds checks.
+#[derive(Clone)]
+struct SeqFreqs {
+    ll: [u32; 64],
+    ml: [u32; 64],
+    of: [u32; 64],
+    extra_bits: u64,
+}
+
+impl Default for SeqFreqs {
+    fn default() -> Self {
+        Self {
+            ll: [0; 64],
+            ml: [0; 64],
+            of: [0; 64],
+            extra_bits: 0,
+        }
+    }
+}
+
 pub(crate) struct BlockEncodeWorkspace {
+    /// Literals of the last packed block in `lit_buf[..lit_len]`. The buffer
+    /// only grows, so packing a block does not clear it.
     pub lit_buf: Vec<u8>,
+    lit_len: usize,
     pub lit_section: Vec<u8>,
     pub pred_seq: Vec<u8>,
     pub cust_seq: Vec<u8>,
@@ -51,7 +103,10 @@ pub(crate) struct BlockEncodeWorkspace {
     pub pred_writer_buf: Vec<u8>,
     pub cust_writer_buf: Vec<u8>,
     pub repeat_writer_buf: Vec<u8>,
+    /// Sequences of the last packed block in `packed_seqs[..num_packed]`.
     packed_seqs: Vec<PackedSeq>,
+    num_packed: usize,
+    seq_freqs: SeqFreqs,
     custom_seq_tables: CustomSeqTables,
     pub prev_huffman: Option<HuffmanEncodeTable>,
     pub prev_ll: Option<FseEncodeTable>,
@@ -63,6 +118,7 @@ impl BlockEncodeWorkspace {
     pub fn new() -> Self {
         Self {
             lit_buf: Vec::new(),
+            lit_len: 0,
             lit_section: Vec::new(),
             pred_seq: Vec::new(),
             cust_seq: Vec::new(),
@@ -73,6 +129,8 @@ impl BlockEncodeWorkspace {
             cust_writer_buf: Vec::new(),
             repeat_writer_buf: Vec::new(),
             packed_seqs: Vec::new(),
+            num_packed: 0,
+            seq_freqs: SeqFreqs::default(),
             custom_seq_tables: CustomSeqTables::new(),
             prev_huffman: None,
             prev_ll: None,
@@ -114,7 +172,9 @@ impl Default for FseEncodeTable {
     }
 }
 
-const MAX_SYMBOLS: usize = 53;
+/// Symbol slots per table: 53 codes rounded up to a power of two, so the
+/// encoders mask symbol indices instead of bounds-checking them.
+const MAX_SYMBOLS: usize = 64;
 const MAX_TABLE_SIZE: usize = 512;
 
 impl FseEncodeTable {
@@ -316,6 +376,18 @@ impl FseEncodeTable {
         true
     }
 
+    /// Encodes `symbol` from `state`. Returns the low state bits to emit,
+    /// their count, and the next state. The masks keep indices in bounds
+    /// without a check; valid tables never need them.
+    #[inline(always)]
+    fn transition(&self, symbol: u8, state: u32) -> (u32, u32, u32) {
+        let tt = &self.symbol_tt[usize::from(symbol) & (MAX_SYMBOLS - 1)];
+        let nb = tt.delta_nb_bits.wrapping_add(state) >> 16;
+        let idx = ((state >> nb) as i32 + tt.delta_find_state) as usize;
+        let next = u32::from(self.state_table[idx & (MAX_TABLE_SIZE - 1)]);
+        (state & ((1u32 << nb) - 1), nb, next)
+    }
+
     #[inline]
     fn init_state(&self, symbol: u8) -> u32 {
         let tt = &self.symbol_tt[symbol as usize];
@@ -432,7 +504,8 @@ fn encode_compressed_block_impl(
     pack_sequences_and_literals(src, sequences, rep_offsets, workspace);
 
     let raw_literals = encode_literals_section(
-        &workspace.lit_buf,
+        &workspace.lit_buf[..workspace.lit_len],
+        n,
         &mut workspace.lit_section,
         &mut workspace.huf_concat,
         &mut workspace.huf_stream,
@@ -445,7 +518,7 @@ fn encode_compressed_block_impl(
 
     if has_repeat {
         encode_seq_repeat(
-            &workspace.packed_seqs,
+            &workspace.packed_seqs[..workspace.num_packed],
             workspace.prev_ll.as_ref().unwrap(),
             workspace.prev_of.as_ref().unwrap(),
             workspace.prev_ml.as_ref().unwrap(),
@@ -456,14 +529,16 @@ fn encode_compressed_block_impl(
 
     let do_codes = policy.custom_tables && n >= 64;
     let seq_data = if do_codes {
-        let (ll_freq, ml_freq, of_freq, total_extra_bits) =
-            compute_frequencies(&workspace.packed_seqs);
-        let pred_est = estimate_predefined_cost(&ll_freq, &ml_freq, &of_freq, total_extra_bits, n);
+        let f = &workspace.seq_freqs;
+        let ll_freq = f.ll.first_chunk::<36>().unwrap();
+        let ml_freq = f.ml.first_chunk::<53>().unwrap();
+        let of_freq = f.of.first_chunk::<32>().unwrap();
+        let pred_est = estimate_predefined_cost(ll_freq, ml_freq, of_freq, f.extra_bits, n);
         let use_custom = encode_seq_custom(
-            &workspace.packed_seqs,
-            &ll_freq,
-            &ml_freq,
-            &of_freq,
+            &workspace.packed_seqs[..workspace.num_packed],
+            ll_freq,
+            ml_freq,
+            of_freq,
             n,
             pred_est,
             &mut workspace.cust_seq,
@@ -474,7 +549,7 @@ fn encode_compressed_block_impl(
             &workspace.cust_seq
         } else {
             encode_seq_predefined(
-                &workspace.packed_seqs,
+                &workspace.packed_seqs[..workspace.num_packed],
                 &mut workspace.pred_seq,
                 &mut workspace.pred_writer_buf,
             );
@@ -486,7 +561,7 @@ fn encode_compressed_block_impl(
         }
     } else {
         encode_seq_predefined(
-            &workspace.packed_seqs,
+            &workspace.packed_seqs[..workspace.num_packed],
             &mut workspace.pred_seq,
             &mut workspace.pred_writer_buf,
         );
@@ -504,12 +579,8 @@ fn encode_compressed_block_impl(
     workspace.prev_of = None;
     workspace.prev_ml = None;
 
-    let literal_section_len = workspace.lit_section.len()
-        + if raw_literals {
-            workspace.lit_buf.len()
-        } else {
-            0
-        };
+    let literal_section_len =
+        workspace.lit_section.len() + if raw_literals { workspace.lit_len } else { 0 };
     let block_len = literal_section_len + seq_data.len();
     if block_len >= src.len() {
         *rep_offsets = saved_rep;
@@ -525,7 +596,7 @@ fn encode_compressed_block_impl(
     output.push((header >> 16) as u8)?;
     output.extend_from_slice(&workspace.lit_section)?;
     if raw_literals {
-        output.extend_from_slice(&workspace.lit_buf)?;
+        output.extend_from_slice(&workspace.lit_buf[..workspace.lit_len])?;
     }
     output.extend_from_slice(seq_data)
 }
@@ -541,6 +612,7 @@ fn encode_literals_only_block(
 ) -> Result<(), CompressError> {
     let raw_literals = encode_literals_section(
         src,
+        0,
         &mut workspace.lit_section,
         &mut workspace.huf_concat,
         &mut workspace.huf_stream,
@@ -604,16 +676,15 @@ fn encode_compressed_block_raw_impl(
     pack_sequences_and_literals(src, sequences, rep_offsets, workspace);
 
     workspace.lit_section.clear();
-    encode_raw_literals_header(workspace.lit_buf.len(), &mut workspace.lit_section);
+    encode_raw_literals_header(workspace.lit_len, &mut workspace.lit_section);
 
     encode_seq_predefined(
-        &workspace.packed_seqs,
+        &workspace.packed_seqs[..workspace.num_packed],
         &mut workspace.pred_seq,
         &mut workspace.pred_writer_buf,
     );
 
-    let block_len =
-        workspace.lit_section.len() + workspace.lit_buf.len() + workspace.pred_seq.len();
+    let block_len = workspace.lit_section.len() + workspace.lit_len + workspace.pred_seq.len();
     if block_len >= src.len() {
         *rep_offsets = saved_rep;
         return encode_raw_block(src, last, output);
@@ -625,7 +696,7 @@ fn encode_compressed_block_raw_impl(
     output.push((header >> 8) as u8)?;
     output.push((header >> 16) as u8)?;
     output.extend_from_slice(&workspace.lit_section)?;
-    output.extend_from_slice(&workspace.lit_buf)?;
+    output.extend_from_slice(&workspace.lit_buf[..workspace.lit_len])?;
     output.extend_from_slice(&workspace.pred_seq)
 }
 
@@ -653,22 +724,26 @@ fn pack_sequences_and_literals_impl(
     let n = sequences.len();
     let src_len = src.len();
 
-    let mut lit_buf = core::mem::take(&mut workspace.lit_buf);
-    if lit_buf.len() < src_len + 32 {
-        lit_buf.resize(src_len + 32, 0);
+    if workspace.lit_buf.len() < src_len + 32 {
+        workspace.lit_buf.resize(src_len + 32, 0);
     }
+    if workspace.packed_seqs.len() < n {
+        workspace.packed_seqs.resize(n, PackedSeq::default());
+    }
+    let lit_buf = &mut workspace.lit_buf[..];
+    let freqs = &mut workspace.seq_freqs;
+    freqs.ll.fill(0);
+    freqs.ml.fill(0);
+    freqs.of.fill(0);
+    let mut extra_bits_total = 0u64;
     let mut lit_pos = 0usize;
-    let mut packed_seqs = core::mem::take(&mut workspace.packed_seqs);
-    packed_seqs.clear();
-    packed_seqs.reserve(n);
-
     let mut lit_offset = 0usize;
 
     let mut rep0 = rep_offsets[0];
     let mut rep1 = rep_offsets[1];
     let mut rep2 = rep_offsets[2];
 
-    for seq in &sequences[..n] {
+    for (seq, packed) in sequences.iter().zip(&mut workspace.packed_seqs[..n]) {
         let ll = seq.literal_length as usize;
         debug_assert!(lit_offset + ll <= src_len);
         if ll <= 16 && lit_offset + 16 <= src_len {
@@ -681,45 +756,34 @@ fn pack_sequences_and_literals_impl(
         lit_pos += ll;
         lit_offset += ll + seq.match_length as usize;
 
-        let actual_offset = seq.offset;
-        let ov = if seq.literal_length > 0 {
-            if actual_offset == rep0 {
-                1
-            } else if actual_offset == rep1 {
-                rep1 = rep0;
-                rep0 = actual_offset;
-                2
-            } else if actual_offset == rep2 {
-                rep2 = rep1;
-                rep1 = rep0;
-                rep0 = actual_offset;
-                3
-            } else {
-                rep2 = rep1;
-                rep1 = rep0;
-                rep0 = actual_offset;
-                actual_offset + 3
-            }
-        } else if actual_offset == rep1 {
-            rep1 = rep0;
-            rep0 = actual_offset;
-            1
-        } else if actual_offset == rep2 {
-            rep2 = rep1;
-            rep1 = rep0;
-            rep0 = actual_offset;
-            2
-        } else if rep0 > 1 && actual_offset == rep0 - 1 {
-            rep2 = rep1;
-            rep1 = rep0;
-            rep0 = actual_offset;
-            3
+        // Repeat offsets for codes 1 to 3. Without literals, code 1 means the
+        // second offset and code 3 the first offset minus one. Selects instead
+        // of branches: rep and new offsets interleave unpredictably.
+        let off = seq.offset;
+        let no_lits = seq.literal_length == 0;
+        let (c1, c2, c3) = if no_lits {
+            (rep1, rep2, rep0 - 1)
         } else {
-            rep2 = rep1;
-            rep1 = rep0;
-            rep0 = actual_offset;
-            actual_offset + 3
+            (rep0, rep1, rep2)
         };
+        let mut ov = if off == c3 { 3 } else { off + 3 };
+        if off == c2 {
+            ov = 2;
+        }
+        if off == c1 {
+            ov = 1;
+        }
+        // Code 1 with literals keeps the history; the code naming the second
+        // offset swaps the first two; every other code shifts in `off`.
+        let keep = !no_lits && ov == 1;
+        let swap = ov == 2 - u32::from(no_lits);
+        if !(keep || swap) {
+            rep2 = rep1;
+        }
+        if !keep {
+            rep1 = rep0;
+        }
+        rep0 = off;
 
         let ll_c = ll_code(seq.literal_length);
         let ml_c = ml_code(seq.match_length);
@@ -735,13 +799,18 @@ fn pack_sequences_and_literals_impl(
             | ((of_extra as u64) << (ll_nb + ml_nb));
         let extra_nbits = ll_nb + ml_nb + of_c;
 
-        packed_seqs.push(PackedSeq {
+        freqs.ll[usize::from(ll_c) & 63] += 1;
+        freqs.ml[usize::from(ml_c) & 63] += 1;
+        freqs.of[usize::from(of_c) & 63] += 1;
+        extra_bits_total += u64::from(extra_nbits);
+
+        *packed = PackedSeq {
             extra_bits,
             ll_c,
             ml_c,
             of_c,
             extra_nbits,
-        });
+        };
     }
     rep_offsets[0] = rep0;
     rep_offsets[1] = rep1;
@@ -752,23 +821,9 @@ fn pack_sequences_and_literals_impl(
         lit_buf[lit_pos..lit_pos + rest].copy_from_slice(&src[lit_offset..src_len]);
         lit_pos += rest;
     }
-    lit_buf.truncate(lit_pos);
-    workspace.lit_buf = lit_buf;
-    workspace.packed_seqs = packed_seqs;
-}
-
-fn compute_frequencies(packed: &[PackedSeq]) -> ([u32; 36], [u32; 53], [u32; 32], u64) {
-    let mut ll_freq = [0u32; 36];
-    let mut ml_freq = [0u32; 53];
-    let mut of_freq = [0u32; 32];
-    let mut total_extra_bits: u64 = 0;
-    for p in packed {
-        ll_freq[p.ll_c as usize] += 1;
-        ml_freq[p.ml_c as usize] += 1;
-        of_freq[p.of_c as usize] += 1;
-        total_extra_bits += p.extra_nbits as u64;
-    }
-    (ll_freq, ml_freq, of_freq, total_extra_bits)
+    freqs.extra_bits = extra_bits_total;
+    workspace.lit_len = lit_pos;
+    workspace.num_packed = n;
 }
 
 /// Approximate log2(x) in 8.8 fixed point (result = log2(x) * 256).
@@ -853,8 +908,18 @@ fn histogram_too_dense(counts: &[u32; 256], limit_fp8: u32) -> bool {
     bits_fp8 > u64::from(limit_fp8) * u64::from(n)
 }
 
+/// Literals sampled from each end before the full histogram when they look
+/// incompressible.
+const SUSPECT_SAMPLE: usize = 4096;
+
+/// Literals above this order-0 entropy (bits per byte, 8.8 fixed point) stay
+/// raw: Huffman would save under 0.4%, less than its table costs. Random bytes
+/// measure about 8.02 with the `log2_fp8` estimate.
+const FLAT_LITERALS_FP8: u32 = 8 * 256 - 8;
+
 fn encode_literals_section(
     lits: &[u8],
+    num_seq: usize,
     output: &mut Vec<u8>,
     huf_concat: &mut Vec<u8>,
     huf_stream: &mut Vec<u8>,
@@ -893,7 +958,25 @@ fn encode_literals_section(
         encode_raw_literals_header(lits.len(), output);
         return true;
     }
+    // Few sequences per literal suggest incompressible bytes. As in C zstd,
+    // two small samples then rule out Huffman before the full histogram.
+    let suspect = num_seq == 0 || lits.len() / num_seq >= 20;
+    if suspect && lits.len() >= 2 * SUSPECT_SAMPLE {
+        let head = byte_histogram(&lits[..SUSPECT_SAMPLE]);
+        let tail = byte_histogram(&lits[lits.len() - SUSPECT_SAMPLE..]);
+        let sample: [u32; 256] = core::array::from_fn(|i| head[i] + tail[i]);
+        if histogram_too_dense(&sample, FLAT_LITERALS_FP8) {
+            *prev_huffman = None;
+            encode_raw_literals_header(lits.len(), output);
+            return true;
+        }
+    }
     let freqs = byte_histogram(lits);
+    if histogram_too_dense(&freqs, FLAT_LITERALS_FP8) {
+        *prev_huffman = None;
+        encode_raw_literals_header(lits.len(), output);
+        return true;
+    }
     if limit != u32::MAX && lits.len() <= DENSITY_SAMPLE && histogram_too_dense(&freqs, limit) {
         *prev_huffman = None;
         encode_raw_literals_header(lits.len(), output);
@@ -910,6 +993,13 @@ fn encode_literals_section(
         None
     };
     let fresh_bits = fresh.as_ref().map_or(u64::MAX, |f| f.1);
+    // The estimates are lower bounds: when neither beats raw bytes, skip the
+    // encode.
+    if reuse_bits.unwrap_or(u64::MAX).min(fresh_bits) / 8 >= lits.len() as u64 {
+        *prev_huffman = None;
+        encode_raw_literals_header(lits.len(), output);
+        return true;
+    }
 
     if let Some(bits) = reuse_bits
         && bits <= fresh_bits
@@ -1052,14 +1142,12 @@ fn encode_seq_predefined_impl(
             bits_used &= 7;
         };
     }
+    add_extra_bits_macro!(add_extra_bits, add_bits, flush_fast);
     macro_rules! encode_transition {
         ($table:expr, $symbol:expr, $state:expr) => {{
-            let tt = &$table.symbol_tt[$symbol as usize];
-            let nb = (tt.delta_nb_bits.wrapping_add($state)) >> 16;
-            add_bits!($state & ((1u32 << nb) - 1), nb);
-            let idx = ($state >> nb) as i32 + tt.delta_find_state;
-            debug_assert!(idx >= 0);
-            $state = $table.state_table[idx as usize] as u32;
+            let (out, nb, next) = $table.transition($symbol, $state);
+            add_bits!(out, nb);
+            $state = next;
         }};
     }
 
@@ -1072,9 +1160,7 @@ fn encode_seq_predefined_impl(
         encode_transition!(tables.of, p.of_c, of_state);
         encode_transition!(tables.ml, p.ml_c, ml_state);
         encode_transition!(tables.ll, p.ll_c, ll_state);
-        flush_fast!();
-
-        add_bits!(p.extra_bits, p.extra_nbits);
+        add_extra_bits!(p);
     }
 
     flush_fast!();
@@ -1157,6 +1243,7 @@ fn encode_seq_repeat_impl(
             bits_used &= 7;
         };
     }
+    add_extra_bits_macro!(add_extra_bits, add_bits, flush_fast);
 
     add_bits!(last.extra_bits, last.extra_nbits);
 
@@ -1165,29 +1252,21 @@ fn encode_seq_repeat_impl(
 
         flush_fast!();
         {
-            let tt = &of_t.symbol_tt[p.of_c as usize];
-            let nb = (tt.delta_nb_bits.wrapping_add(of_s)) >> 16;
-            add_bits!(of_s & ((1u32 << nb) - 1), nb);
-            let idx = (of_s >> nb) as i32 + tt.delta_find_state;
-            of_s = of_t.state_table[idx as usize] as u32;
+            let (out, nb, next) = of_t.transition(p.of_c, of_s);
+            add_bits!(out, nb);
+            of_s = next;
         }
         {
-            let tt = &ml_t.symbol_tt[p.ml_c as usize];
-            let nb = (tt.delta_nb_bits.wrapping_add(ml_s)) >> 16;
-            add_bits!(ml_s & ((1u32 << nb) - 1), nb);
-            let idx = (ml_s >> nb) as i32 + tt.delta_find_state;
-            ml_s = ml_t.state_table[idx as usize] as u32;
+            let (out, nb, next) = ml_t.transition(p.ml_c, ml_s);
+            add_bits!(out, nb);
+            ml_s = next;
         }
         {
-            let tt = &ll_t.symbol_tt[p.ll_c as usize];
-            let nb = (tt.delta_nb_bits.wrapping_add(ll_s)) >> 16;
-            add_bits!(ll_s & ((1u32 << nb) - 1), nb);
-            let idx = (ll_s >> nb) as i32 + tt.delta_find_state;
-            ll_s = ll_t.state_table[idx as usize] as u32;
+            let (out, nb, next) = ll_t.transition(p.ll_c, ll_s);
+            add_bits!(out, nb);
+            ll_s = next;
         }
-        flush_fast!();
-
-        add_bits!(p.extra_bits, p.extra_nbits);
+        add_extra_bits!(p);
     }
 
     flush_fast!();
@@ -1507,6 +1586,7 @@ fn encode_seq_custom_impl(
             bits_used &= 7;
         };
     }
+    add_extra_bits_macro!(add_extra_bits, add_bits, flush_fast);
 
     add_bits!(last.extra_bits, last.extra_nbits);
 
@@ -1524,29 +1604,21 @@ fn encode_seq_custom_impl(
 
                 flush_fast!();
                 {
-                    let tt = &of_t.symbol_tt[p.of_c as usize];
-                    let nb = (tt.delta_nb_bits.wrapping_add(of_s)) >> 16;
-                    add_bits!(of_s & ((1u32 << nb) - 1), nb);
-                    let idx = (of_s >> nb) as i32 + tt.delta_find_state;
-                    of_s = of_t.state_table[idx as usize] as u32;
+                    let (out, nb, next) = of_t.transition(p.of_c, of_s);
+                    add_bits!(out, nb);
+                    of_s = next;
                 }
                 {
-                    let tt = &ml_t.symbol_tt[p.ml_c as usize];
-                    let nb = (tt.delta_nb_bits.wrapping_add(ml_s)) >> 16;
-                    add_bits!(ml_s & ((1u32 << nb) - 1), nb);
-                    let idx = (ml_s >> nb) as i32 + tt.delta_find_state;
-                    ml_s = ml_t.state_table[idx as usize] as u32;
+                    let (out, nb, next) = ml_t.transition(p.ml_c, ml_s);
+                    add_bits!(out, nb);
+                    ml_s = next;
                 }
                 {
-                    let tt = &ll_t.symbol_tt[p.ll_c as usize];
-                    let nb = (tt.delta_nb_bits.wrapping_add(ll_s)) >> 16;
-                    add_bits!(ll_s & ((1u32 << nb) - 1), nb);
-                    let idx = (ll_s >> nb) as i32 + tt.delta_find_state;
-                    ll_s = ll_t.state_table[idx as usize] as u32;
+                    let (out, nb, next) = ll_t.transition(p.ll_c, ll_s);
+                    add_bits!(out, nb);
+                    ll_s = next;
                 }
-                flush_fast!();
-
-                add_bits!(p.extra_bits, p.extra_nbits);
+                add_extra_bits!(p);
             }
 
             flush_fast!();
@@ -1575,11 +1647,9 @@ fn encode_seq_custom_impl(
             macro_rules! encode_transition_opt {
                 ($table:expr, $state:expr, $symbol:expr) => {
                     if let (Some(t), Some(s)) = (&$table, &mut $state) {
-                        let tt = &t.symbol_tt[$symbol as usize];
-                        let nb = (tt.delta_nb_bits.wrapping_add(*s)) >> 16;
-                        add_bits!(*s & ((1u32 << nb) - 1), nb);
-                        let idx = (*s >> nb) as i32 + tt.delta_find_state;
-                        *s = t.state_table[idx as usize] as u32;
+                        let (out, nb, next) = t.transition($symbol, *s);
+                        add_bits!(out, nb);
+                        *s = next;
                     }
                 };
             }
@@ -1591,9 +1661,7 @@ fn encode_seq_custom_impl(
                 encode_transition_opt!(of_table, of_state, p.of_c);
                 encode_transition_opt!(ml_table, ml_state, p.ml_c);
                 encode_transition_opt!(ll_table, ll_state, p.ll_c);
-                flush_fast!();
-
-                add_bits!(p.extra_bits, p.extra_nbits);
+                add_extra_bits!(p);
             }
 
             flush_fast!();

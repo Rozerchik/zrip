@@ -6,6 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::primitives;
+use crate::primitives::first4;
 use crate::strategy::LevelParams;
 use zrip_core::Sequence;
 use zrip_core::hash::{PRIME32_1, PRIME64_1};
@@ -19,6 +20,30 @@ macro_rules! rd32 {
 macro_rules! rd64 {
     ($src:expr, $pos:expr) => {
         paranoid_unsafe_call!(primitives::rd64($src, $pos))
+    };
+}
+
+macro_rules! rd32_upto {
+    ($src:expr, $pos:expr, $limit:expr) => {
+        paranoid_unsafe_call!(primitives::rd32_upto($src, $pos, $limit))
+    };
+}
+
+macro_rules! rd64_upto {
+    ($src:expr, $pos:expr, $limit:expr) => {
+        paranoid_unsafe_call!(primitives::rd64_upto($src, $pos, $limit))
+    };
+}
+
+macro_rules! rd32_again {
+    ($src:expr, $pos:expr, $v:expr) => {
+        paranoid_unsafe_call!(primitives::rd32_again($src, $pos, $v))
+    };
+}
+
+macro_rules! rd64_again {
+    ($src:expr, $pos:expr, $v:expr) => {
+        paranoid_unsafe_call!(primitives::rd64_again($src, $pos, $v))
     };
 }
 
@@ -106,6 +131,16 @@ pub(crate) fn compress_dfast_block(
             sequences,
         ),
         (..=4, 18, 18) => compress_dfast_block_h18_mls4(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_short,
+            hash_long,
+            sequences,
+        ),
+        (..=4, 20, 20) => compress_dfast_block_h20_mls4(
             src,
             block_start,
             block_end,
@@ -259,6 +294,30 @@ fn compress_dfast_block_h18_mls4(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
+fn compress_dfast_block_h20_mls4(
+    src: &[u8],
+    block_start: usize,
+    block_end: usize,
+    params: &LevelParams,
+    rep_offsets: &[u32; 3],
+    hash_short: &mut [u32],
+    hash_long: &mut [u32],
+    sequences: &mut Vec<Sequence>,
+) {
+    simd_body!(compress_dfast_block_impl::<20, 20, 4>(
+        src,
+        block_start,
+        block_end,
+        params,
+        rep_offsets,
+        hash_short,
+        hash_long,
+        sequences,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn compress_dfast_block_mls5(
     src: &[u8],
     block_start: usize,
@@ -301,7 +360,8 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
 ) {
     sequences.clear();
     let block_size = block_end - block_start;
-    if block_size < 16 {
+    // The length check lets the compiler see `ilimit + 8 <= src.len()`.
+    if block_size < 16 || src.len() < 16 {
         return;
     }
     let acceleration = params.target_length.max(1) as usize;
@@ -315,7 +375,7 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
     } else {
         params.search_log
     };
-    let ilimit = block_end - 8;
+    let ilimit = (block_end - 8).min(src.len() - 8);
     let max_distance = if HASH_LOG == 18 && SHORT_LOG == 18 && MLS == 4 {
         1usize << 21
     } else {
@@ -332,6 +392,8 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
     } else {
         params.chain_log
     };
+    let hash_long = primitives::exact_table::<HASH_LOG>(hash_long);
+    let hash_short = primitives::exact_table::<SHORT_LOG>(hash_short);
 
     let mut rep0 = rep_offsets[0];
     let mut rep1 = rep_offsets[1];
@@ -414,10 +476,15 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             break;
         }
 
-        let mut hs0 = short_hash::<MLS>(src, ip0, short_log);
-        let mut hl0 = h8(rd64!(src, ip0), hash_log);
-        let mut hs1 = short_hash::<MLS>(src, ip1, short_log);
-        let mut hl1 = h8(rd64!(src, ip1), hash_log);
+        // Bytes at ip0 and ip1 for the hashes. The paranoid build reuses them
+        // for the match checks through `rd32_again` and `rd64_again`, skipping
+        // bounds checks.
+        let mut v0 = rd64_upto!(src, ip0, ilimit);
+        let mut v1 = rd64_upto!(src, ip1, ilimit);
+        let mut hs0 = short_hash_val::<MLS>(v0, short_log);
+        let mut hl0 = h8(v0, hash_log);
+        let mut hs1 = short_hash_val::<MLS>(v1, short_log);
+        let mut hl1 = h8(v1, hash_log);
 
         let mut match_short = hash_load!(hash_short, hs0) as usize;
         let mut match_long = hash_load!(hash_long, hl0) as usize;
@@ -426,43 +493,41 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             // --- Store hashes for ip0 ---
             hash_store!(hash_short, hs0, ip0 as u32);
             hash_store!(hash_long, hl0, ip0 as u32);
+            let v2 = primitives::rd64_ahead_upto(src, ip2, ilimit);
 
             // --- Rep check at step-ahead position ip2 ---
             {
                 let r0 = rep0 as usize;
-                if ip2 >= r0 {
-                    let v = rd32!(src, ip2);
-                    if v == rd32!(src, ip2 - r0) {
-                        let fill_pos = ip0;
-                        hash_store!(hash_short, hs1, ip1 as u32);
-                        hash_store!(hash_long, hl1, ip1 as u32);
-                        ip0 = ip2;
-                        if ip0 > anchor && ip0 > r0 && src[ip0 - 1] == src[ip0 - r0 - 1] {
-                            ip0 -= 1;
-                        }
-                        let back = ip2 - ip0;
-                        let mlen = count_match!(src, ip2 + 4, ip2 - r0 + 4, block_end) + 4 + back;
-                        sequences.push(Sequence {
-                            literal_length: (ip0 - anchor) as u32,
-                            offset: r0 as u32,
-                            match_length: mlen as u32,
-                        });
-                        ip0 += mlen;
-                        anchor = ip0;
-                        if ip0 <= ilimit {
-                            update_hashes_inline!(fill_pos + 2);
-                            update_hashes_inline!(ip0 - 2);
-                            rep_match_loop_inline!();
-                        }
-                        continue 'start;
+                if ip2 >= r0 && rd32_again!(src, ip2, v2) == rd32_upto!(src, ip2 - r0, ilimit) {
+                    let fill_pos = ip0;
+                    hash_store!(hash_short, hs1, ip1 as u32);
+                    hash_store!(hash_long, hl1, ip1 as u32);
+                    ip0 = ip2;
+                    if ip0 > anchor && ip0 > r0 && src[ip0 - 1] == src[ip0 - r0 - 1] {
+                        ip0 -= 1;
                     }
+                    let back = ip2 - ip0;
+                    let mlen = count_match!(src, ip2 + 4, ip2 - r0 + 4, block_end) + 4 + back;
+                    sequences.push(Sequence {
+                        literal_length: (ip0 - anchor) as u32,
+                        offset: r0 as u32,
+                        match_length: mlen as u32,
+                    });
+                    ip0 += mlen;
+                    anchor = ip0;
+                    if ip0 <= ilimit {
+                        update_hashes_inline!(fill_pos + 2);
+                        update_hashes_inline!(ip0 - 2);
+                        rep_match_loop_inline!();
+                    }
+                    continue 'start;
                 }
             }
 
             // --- Long match check at ip0 ---
             if match_long < ip0
                 && ip0 - match_long <= max_distance
-                && rd64!(src, ip0) == rd64!(src, match_long)
+                && rd64_again!(src, ip0, v0) == rd64_upto!(src, match_long, ilimit)
             {
                 hash_store!(hash_short, hs1, ip1 as u32);
                 hash_store!(hash_long, hl1, ip1 as u32);
@@ -496,14 +561,14 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             // --- Short match check at ip0 ---
             if match_short < ip0
                 && ip0 - match_short <= max_distance
-                && rd32!(src, ip0) == rd32!(src, match_short)
+                && rd32_again!(src, ip0, v0) == rd32_upto!(src, match_short, ilimit)
             {
                 // ip+1 lookahead: prefer long match at ip1 if significantly better
                 if ip1 < ilimit {
                     let ml_next = hash_load!(hash_long, hl1) as usize;
                     if ml_next < ip1
                         && ip1 - ml_next <= max_distance
-                        && rd64!(src, ip1) == rd64!(src, ml_next)
+                        && rd64_again!(src, ip1, v1) == rd64_upto!(src, ml_next, ilimit)
                     {
                         let long_len = count_match!(src, ip1 + 8, ml_next + 8, block_end) + 8;
                         let short_len = count_match!(src, ip0 + 4, match_short + 4, block_end) + 4;
@@ -577,8 +642,11 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             hs0 = hs1;
             hl0 = hl1;
 
-            hs1 = short_hash::<MLS>(src, ip2, short_log);
-            hl1 = h8(rd64!(src, ip2), hash_log);
+            let v2 = rd64_again!(src, ip2, v2);
+            hs1 = short_hash_val::<MLS>(v2, short_log);
+            hl1 = h8(v2, hash_log);
+            v0 = v1;
+            v1 = v2;
             ip0 = ip1;
             ip1 = ip2;
             ip2 = ip3;
@@ -596,7 +664,7 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             // --- Long match check at shifted ip0 ---
             if match_long < ip0
                 && ip0 - match_long <= max_distance
-                && rd64!(src, ip0) == rd64!(src, match_long)
+                && rd64_again!(src, ip0, v0) == rd64_upto!(src, match_long, ilimit)
             {
                 if step_size + ((ip0 - anchor) >> search_strength) <= 4 {
                     hash_store!(hash_short, hs1, ip1 as u32);
@@ -632,14 +700,14 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             // --- Short match check at shifted ip0 ---
             if match_short < ip0
                 && ip0 - match_short <= max_distance
-                && rd32!(src, ip0) == rd32!(src, match_short)
+                && rd32_again!(src, ip0, v0) == rd32_upto!(src, match_short, ilimit)
             {
                 // ip+1 lookahead (hash_long[hl1] was prefetched in the shift)
                 if ip1 < ilimit {
                     let ml_next = hash_load!(hash_long, hl1) as usize;
                     if ml_next < ip1
                         && ip1 - ml_next <= max_distance
-                        && rd64!(src, ip1) == rd64!(src, ml_next)
+                        && rd64_again!(src, ip1, v1) == rd64_upto!(src, ml_next, ilimit)
                     {
                         let long_len = count_match!(src, ip1 + 8, ml_next + 8, block_end) + 8;
                         let short_len = count_match!(src, ip0 + 4, match_short + 4, block_end) + 4;
@@ -717,8 +785,11 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             hs0 = hs1;
             hl0 = hl1;
 
-            hs1 = short_hash::<MLS>(src, ip2, short_log);
-            hl1 = h8(rd64!(src, ip2), hash_log);
+            let v2 = rd64_upto!(src, ip2, ilimit);
+            hs1 = short_hash_val::<MLS>(v2, short_log);
+            hl1 = h8(v2, hash_log);
+            v0 = v1;
+            v1 = v2;
             ip0 = ip1;
             ip1 = ip2;
             let step = step_size + ((ip0 - anchor) >> skip_shift);
@@ -855,6 +926,16 @@ fn h4(val: u32, hash_log: u32) -> usize {
 #[inline(always)]
 fn h5(val: u64, hash_log: u32) -> usize {
     ((val << 24).wrapping_mul(PRIME64_1) >> (64 - hash_log)) as usize
+}
+
+/// Short-table hash of the eight bytes `v` read at a position.
+#[inline(always)]
+fn short_hash_val<const MLS: u32>(v: u64, short_log: u32) -> usize {
+    if MLS <= 4 {
+        h4(first4(v), short_log)
+    } else {
+        h5(v, short_log)
+    }
 }
 
 #[inline(always)]

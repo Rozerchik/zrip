@@ -30,14 +30,20 @@ the encoder and core primitives:
 
 | Category | Default | Paranoid |
 |:---------|:--------|:---------|
-| Encoder indexing | `get_unchecked`, `read_unaligned` | Direct indexing, `from_le_bytes` |
+| Encoder indexing | `get_unchecked`, `read_unaligned` | Direct indexing, `from_ne_bytes` |
 | Decoder SIMD dispatch | `fearless_simd::dispatch!` | Same (no unsafe needed) |
-| Decoder wild-copy | 16-byte unaligned load/store | `extend_from_slice`, `extend_from_within` |
+| Decoder wild-copy | 16- and 32-byte unaligned copies into spare capacity | Chunked copies within a zeroed slice |
 | Huffman BMI2 dispatch | `#[target_feature]` wrapper | Gated out; generic call |
 
 The safe alternatives use the same algorithms and produce identical output.
-Encode throughput drops roughly 40% (corpus dependent). Decode throughput
-drops roughly 20% due to safe wild-copy fallbacks in `fast_vec.rs`.
+Encode throughput drops 1-8% (Silesia, levels -8 to 4). The match finders keep
+most bounds checks off their hot loops: hash tables are cut to their exact
+size, bytes read for hashing are reused for match checks, and DFast clamps
+reads to a limit the compiler can prove in bounds. A clamped read never leaves
+the input, but if a finder invariant broke, it would read the wrong bytes
+instead of panicking; debug builds assert the invariants. Decode throughput
+drops 11-14% (Silesia), from bounds checks on the copies and zeroing each
+block's output room in `fast_vec.rs`.
 
 The feature exists for users who need a guarantee of zero unsafe, or for
 auditing and benchmarking the cost of safe-only codepaths.

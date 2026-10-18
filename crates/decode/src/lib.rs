@@ -38,7 +38,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::exec::{SequenceOutputScope, decode_execute_sequences, decode_execute_single_sequence};
-use crate::fast_vec::WILDCOPY_OVERLENGTH;
+use crate::fast_vec::{Literals, WILDCOPY_OVERLENGTH};
 use crate::literals::decode_literals_ws;
 use crate::sequences::{SequenceDecodeTables, parse_sequence_count, parse_sequence_tables_ws};
 use zrip_core::block::{BlockType, parse_block_header};
@@ -55,6 +55,10 @@ pub(crate) struct BlockDecodeWorkspace {
     pub literal_buf: Vec<u8>,
     pub huf_table: Vec<HuffmanDecodeEntry>,
     pub huf_table_log: u8,
+    /// Two-symbol rows for `huf_table`, built on first use.
+    pub huf_pairs: Vec<u32>,
+    /// Whether `huf_pairs` describes the current `huf_table`.
+    pub huf_pairs_valid: bool,
     pub huf_valid: bool,
     pub huf_all_weights: Vec<u8>,
     pub huf_weights: Vec<u8>,
@@ -80,6 +84,8 @@ impl BlockDecodeWorkspace {
             literal_buf: Vec::new(),
             huf_table: Vec::new(),
             huf_table_log: 0,
+            huf_pairs: Vec::new(),
+            huf_pairs_valid: false,
             huf_valid: false,
             huf_all_weights: Vec::new(),
             huf_weights: Vec::new(),
@@ -107,6 +113,7 @@ impl BlockDecodeWorkspace {
     /// Records that `huf_table` was replaced, so the cached Huffman header and
     /// weights no longer describe it.
     pub(crate) fn huffman_table_replaced(&mut self) {
+        self.huf_pairs_valid = false;
         self.huf_last_weights_valid = false;
         self.huf_last_header_valid = false;
     }
@@ -507,25 +514,27 @@ fn decode_compressed_block(
     ws: &mut BlockDecodeWorkspace,
     dict_history: &[u8],
 ) -> Result<(), DecompressError> {
-    let lit_consumed = decode_literals_ws(data, ws)?;
+    let (lit_consumed, lits_at) = decode_literals_ws(data, ws)?;
 
     let remaining = &data[lit_consumed..];
 
     if remaining.is_empty() {
-        if output.len() - output_start + ws.literal_buf.len() > max_output {
+        let lits = lits_at.resolve(data, &ws.literal_buf).as_slice();
+        if output.len() - output_start + lits.len() > max_output {
             return Err(DecompressError::OutputTooSmall);
         }
-        output.extend_from_slice(&ws.literal_buf);
+        output.extend_from_slice(lits);
         return Ok(());
     }
 
     let (num_sequences, seq_count_size) = parse_sequence_count(remaining)?;
 
     if num_sequences == 0 {
-        if output.len() - output_start + ws.literal_buf.len() > max_output {
+        let lits = lits_at.resolve(data, &ws.literal_buf).as_slice();
+        if output.len() - output_start + lits.len() > max_output {
             return Err(DecompressError::OutputTooSmall);
         }
-        output.extend_from_slice(&ws.literal_buf);
+        output.extend_from_slice(lits);
         return Ok(());
     }
 
@@ -548,7 +557,7 @@ fn decode_compressed_block(
         num_sequences,
         seq_tables,
         rep_offsets,
-        &ws.literal_buf,
+        lits_at.resolve(data, &ws.literal_buf),
         output,
         scope,
     );
@@ -569,11 +578,12 @@ pub(crate) fn decode_sequences_dispatch(
     num_sequences: u32,
     seq_tables: &mut SequenceDecodeTables,
     rep_offsets: &mut [u32; 3],
-    literals: &[u8],
+    literals: Literals<'_>,
     output: &mut Vec<u8>,
     scope: SequenceOutputScope<'_>,
 ) -> Result<(), DecompressError> {
     if num_sequences == 1 {
+        let literals = literals.as_slice();
         if scope.history.is_empty() {
             return decode_execute_single_sequence::<false>(
                 seq_data,
@@ -738,5 +748,55 @@ mod safety_tests {
     fn compressed_block_rejects_trailing_literals_over_block_limit() {
         let frame = frame_with_oversized_compressed_block_output();
         assert!(decompress(&frame).is_err());
+    }
+
+    /// A frame of a raw block and a compressed block whose `count` sequences
+    /// each copy three bytes from offset 3, with a sequence bitstream that
+    /// holds the offset bits of only the first `with_bits` of them.
+    fn frame_with_short_sequence_stream(count: u8, with_bits: u8) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
+        frame.push(0x00);
+        frame.push(0x00);
+
+        push_block_header(&mut frame, false, 0, 8);
+        frame.extend_from_slice(b"ABCDEFGH");
+
+        let mut block = Vec::new();
+        // Raw literals "xy", then RLE tables: literal length code 0, offset
+        // code 2 (two extra bits) and match length code 0.
+        block.push(2 << 3);
+        block.extend_from_slice(b"xy");
+        block.push(count);
+        block.push(0x54);
+        block.extend_from_slice(&[0, 2, 0]);
+        let mut seq_bits = BitWriter::new();
+        // Offset value 4 + 2: offset 3.
+        for _ in 0..with_bits {
+            seq_bits.write_bits(2, 2);
+        }
+        seq_bits.close_reverse_stream();
+        block.extend_from_slice(&seq_bits.into_bytes());
+
+        push_block_header(&mut frame, true, 2, block.len());
+        frame.extend_from_slice(&block);
+        frame
+    }
+
+    #[test]
+    fn sequence_streams_that_read_past_their_start_are_rejected() {
+        assert_eq!(
+            decompress(&frame_with_short_sequence_stream(1, 1)).unwrap(),
+            b"ABCDEFGHFGHxy"
+        );
+        assert_eq!(
+            decompress(&frame_with_short_sequence_stream(2, 1)),
+            Err(DecompressError::CorruptSequences)
+        );
+        // A block with one sequence takes its own path.
+        assert_eq!(
+            decompress(&frame_with_short_sequence_stream(1, 0)),
+            Err(DecompressError::CorruptSequences)
+        );
     }
 }
