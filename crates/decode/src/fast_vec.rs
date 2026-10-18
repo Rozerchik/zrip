@@ -2,7 +2,7 @@
 use alloc::vec::Vec;
 
 use zrip_core::error::DecompressError;
-use zrip_core::hint::unlikely;
+use zrip_core::hint::{likely, unlikely};
 
 pub(crate) const WILDCOPY_OVERLENGTH: usize = 64;
 
@@ -196,13 +196,12 @@ pub(crate) const LITERAL_OVERREAD: usize = 32;
 ///
 /// The fast sequence path copies literals in whole chunks and reads up to
 /// [`LITERAL_OVERREAD`] bytes past a run, so it serves runs whose end plus
-/// that overread is at most `fast_end`: inside the literals and inside the
-/// bytes. The exact path serves the rest.
+/// that overread lies inside `fast`: the literals and as much slack as the
+/// bytes hold, at most `LITERAL_OVERREAD`. The exact path serves the rest.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Literals<'a> {
-    bytes: &'a [u8],
+    fast: &'a [u8],
     len: usize,
-    fast_end: usize,
 }
 
 impl<'a> Literals<'a> {
@@ -212,9 +211,8 @@ impl<'a> Literals<'a> {
         debug_assert!(len <= bytes.len());
         let len = len.min(bytes.len());
         Self {
-            bytes,
+            fast: &bytes[..(len + LITERAL_OVERREAD).min(bytes.len())],
             len,
-            fast_end: (len + LITERAL_OVERREAD).min(bytes.len()),
         }
     }
 
@@ -225,7 +223,7 @@ impl<'a> Literals<'a> {
 
     /// The literals without the slack.
     pub(crate) fn as_slice(&self) -> &'a [u8] {
-        &self.bytes[..self.len]
+        &self.fast[..self.len]
     }
 }
 
@@ -235,53 +233,56 @@ const SPREAD_ADD: [usize; 8] = [0, 1, 2, 1, 4, 4, 4, 4];
 /// Bytes then subtracted from the source (C zstd's `dec64table`).
 const SPREAD_SUB: [usize; 8] = [8, 8, 8, 7, 8, 9, 10, 11];
 
-/// One block's sequence output.
+/// One block's sequence output: the output from the frame's first byte,
+/// zeroed through the block's limit plus [`WILDCOPY_OVERLENGTH`], so the
+/// copies index an initialized slice.
 ///
-/// The caller's vector is moved in for the block, so its pointer and length
-/// stay in registers. Behind a `&mut Vec`, every byte store may alias the
-/// vector's header, so each copy reloads and stores the length, which
-/// serializes the copies. For the same reason no `&mut SeqOut` leaves the
-/// inlined hot path: the cold path gets the buffer and positions as values.
-///
-/// `new` zeroes the block's maximum plus [`WILDCOPY_OVERLENGTH`] bytes, so
-/// the copies index an initialized slice.
-pub(crate) struct SeqOut {
-    vec: Vec<u8>,
+/// Positions count from the frame's first byte, the lowest byte a match
+/// may copy from, and the block's limit is the slice's end less the
+/// overlength. The loop then keeps only the slice and the output position
+/// in registers. With `NARROW`, the slice ends below 4 GiB, and each
+/// sequence masks its positions to 32 bits ([`ix`]).
+pub(crate) struct SeqOut<'a, const NARROW: bool> {
+    buf: &'a mut [u8],
     /// Bytes of output; every byte below it is initialized.
     op: usize,
-    /// Largest `op` the block may reach.
-    limit: usize,
-    /// Lowest byte a match may copy from: the frame's first byte.
-    frame_start: usize,
 }
 
-impl SeqOut {
-    /// Takes `vec` for a block of at most `max_block` bytes whose frame starts
-    /// at `frame_start`.
+/// Zeroes the room of a block of at most `max_block` bytes appended to `vec`,
+/// whose frame starts at `frame_start`. Returns where the block's [`SeqOut`]
+/// starts in `vec` and its output position there.
+#[inline(always)]
+pub(crate) fn open_block(
+    vec: &mut Vec<u8>,
+    max_block: usize,
+    frame_start: usize,
+) -> (usize, usize) {
+    let start = vec.len();
+    let frame_start = frame_start.min(start);
+    vec.resize(start + max_block + WILDCOPY_OVERLENGTH, 0);
+    (frame_start, start - frame_start)
+}
+
+impl<'a, const NARROW: bool> SeqOut<'a, NARROW> {
+    /// The output in `buf`, which [`open_block`] returned, at position `op`.
     #[inline(always)]
-    pub(crate) fn new(mut vec: Vec<u8>, max_block: usize, frame_start: usize) -> Self {
-        let op = vec.len();
-        vec.reserve(max_block + WILDCOPY_OVERLENGTH);
-        vec.resize(op + max_block + WILDCOPY_OVERLENGTH, 0);
-        Self {
-            vec,
-            op,
-            limit: op + max_block,
-            frame_start: frame_start.min(op),
-        }
+    pub(crate) fn new(buf: &'a mut [u8], op: usize) -> Self {
+        debug_assert!(op + WILDCOPY_OVERLENGTH <= buf.len());
+        Self { buf, op }
     }
 
-    /// Returns the vector, holding exactly the output written so far.
+    /// The output position.
     #[inline(always)]
-    pub(crate) fn finish(mut self) -> Vec<u8> {
-        self.vec.truncate(self.op);
-        self.vec
+    pub(crate) fn op(&self) -> usize {
+        self.op
     }
+}
 
-    /// The buffer, valid for writes up to `limit + WILDCOPY_OVERLENGTH`.
+impl<const NARROW: bool> SeqOut<'_, NARROW> {
+    /// Largest `op` the block may reach.
     #[inline(always)]
-    fn dst(&mut self) -> Dst<'_> {
-        Dst(&mut self.vec[..])
+    fn limit(&self) -> usize {
+        self.buf.len() - WILDCOPY_OVERLENGTH
     }
 
     /// Executes one sequence: `ll` literals from `lits[lp..]`, then `ml`
@@ -289,8 +290,10 @@ impl SeqOut {
     /// frame into `history`.
     ///
     /// The fast path makes three tests: the block's limit, the literals'
-    /// end against their slack, and the offset. Everything else, including the error checks
-    /// in their original order, is in the cold [`execute_exact`].
+    /// end against their slack, and the offset. Everything else, including
+    /// the error checks in their original order, is in the cold
+    /// [`execute_exact`]. With `NARROW`, the tests cover the bounds of each
+    /// copy's first chunk, and the compiler drops those checks.
     #[inline(always)]
     pub(crate) fn execute(
         &mut self,
@@ -301,31 +304,28 @@ impl SeqOut {
         offset: usize,
         history: &[u8],
     ) -> Result<(), DecompressError> {
-        let op = self.op;
-        let frame_start = self.frame_start;
+        let (op, lp) = (ix::<NARROW>(self.op), ix::<NARROW>(lp));
         let lit_end = op + ll;
         let match_end = lit_end + ml;
-        if unlikely(match_end > self.limit) {
+        if unlikely(match_end + WILDCOPY_OVERLENGTH > self.buf.len()) {
             return Err(DecompressError::CorruptSequences);
         }
-        if unlikely(
-            lp + ll + LITERAL_OVERREAD > lits.fast_end
-                || offset.wrapping_sub(1) >= lit_end - frame_start,
-        ) {
-            let span = Span {
-                op,
-                ll,
-                ml,
-                frame_start,
-            };
-            self.op = execute_exact(self.dst(), span, lits.as_slice(), lp, offset, history)?;
-            return Ok(());
+        // `checked_sub` tells the compiler that the source is at most
+        // `lit_end`, which bounds its first chunk.
+        match lit_end.checked_sub(offset) {
+            Some(src) if likely(lp + ll + LITERAL_OVERREAD <= lits.fast.len() && offset != 0) => {
+                let mut dst = Dst(self.buf);
+                dst.wild_literals(op, lits.fast, lp, ll);
+                dst.wild_match(lit_end, src, offset, ml);
+                self.op = match_end;
+                Ok(())
+            }
+            _ => {
+                let span = Span { op, ll, ml };
+                self.op = execute_exact(Dst(self.buf), span, lits.as_slice(), lp, offset, history)?;
+                Ok(())
+            }
         }
-        let mut dst = self.dst();
-        dst.wild_literals(op, lits.bytes, lp, ll);
-        dst.wild_match(lit_end, offset, ml, frame_start);
-        self.op = match_end;
-        Ok(())
     }
 
     /// Appends `lits[lp..lp + len]` exactly.
@@ -340,24 +340,23 @@ impl SeqOut {
         if unlikely(lp > lits.len() || len > lits.len() - lp) {
             return Err(DecompressError::CorruptLiterals);
         }
-        if unlikely(len > self.limit - self.op) {
+        if unlikely(len > self.limit() - self.op) {
             return Err(DecompressError::CorruptSequences);
         }
         let op = self.op;
-        self.dst().put(op, &lits[lp..lp + len]);
+        Dst(self.buf).put(op, &lits[lp..lp + len]);
         self.op += len;
         Ok(())
     }
 }
 
-/// A sequence's place in the output: where it starts, its literal and match
-/// lengths, and the frame's first byte.
+/// A sequence's place in the output: where it starts and its literal and
+/// match lengths.
 #[derive(Clone, Copy)]
 struct Span {
     op: usize,
     ll: usize,
     ml: usize,
-    frame_start: usize,
 }
 
 /// A sequence near the end of the literals, or whose offset reaches before
@@ -373,26 +372,20 @@ fn execute_exact(
     offset: usize,
     history: &[u8],
 ) -> Result<usize, DecompressError> {
-    let Span {
-        op,
-        ll,
-        ml,
-        frame_start,
-    } = span;
+    let Span { op, ll, ml } = span;
     if lp > lits.len() || ll > lits.len() - lp {
         return Err(DecompressError::CorruptLiterals);
     }
     dst.put(op, &lits[lp..lp + ll]);
     let lit_end = op + ll;
-    let reach = lit_end - frame_start;
     if offset == 0 {
         return Err(DecompressError::InvalidOffset);
     }
     let mut done = 0;
-    if offset > reach {
+    if offset > lit_end {
         // The match starts in the history before the frame and continues
         // from the frame's first byte.
-        let before = offset - reach;
+        let before = offset - lit_end;
         if before > history.len() {
             return Err(DecompressError::InvalidOffset);
         }
@@ -401,15 +394,27 @@ fn execute_exact(
         dst.put(lit_end, &history[start..start + done]);
     }
     if ml > done {
-        dst.wild_match(lit_end + done, offset, ml - done, frame_start);
+        let at = lit_end + done;
+        dst.wild_match(at, at - offset, offset, ml - done);
     }
     Ok(lit_end + ml)
 }
 
-/// A block's output buffer as the copies see it, zeroed past the output.
-/// Valid for writes up to the block's limit plus [`WILDCOPY_OVERLENGTH`];
-/// every byte below the output length is initialized.
+/// A block's output as the copies see it ([`SeqOut`]'s slice). Valid for
+/// writes up to the block's limit plus [`WILDCOPY_OVERLENGTH`]; every byte
+/// below the output position is initialized.
 struct Dst<'a>(&'a mut [u8]);
+
+/// `i` masked to 32 bits under `NARROW`.
+///
+/// Every position is then below 4 GiB anyway, so the mask changes nothing,
+/// but it shows the compiler that sums of positions and lengths cannot
+/// overflow. Range checks then take one compare instead of two, and checks
+/// implied by earlier ones go away.
+#[inline(always)]
+const fn ix<const NARROW: bool>(i: usize) -> usize {
+    if NARROW { i & u32::MAX as usize } else { i }
+}
 
 impl Dst<'_> {
     /// Writes `bytes` at `at`; `at + bytes.len()` is within the limit.
@@ -418,46 +423,41 @@ impl Dst<'_> {
         self.0[at..at + bytes.len()].copy_from_slice(bytes);
     }
 
-    /// Copies `len` literals from `lits[lp..]` to `at` in whole chunks: 16
-    /// bytes, then 32-byte chunks. Requires `lp + len + LITERAL_OVERREAD <=
-    /// lits.len()` and `at + len` within the limit.
+    /// Copies `len` literals from `lits[lp..]` to `at` in whole 32-byte
+    /// chunks. Requires `lp + len + LITERAL_OVERREAD <= lits.len()` and
+    /// `at + len` within the limit.
     #[inline(always)]
     fn wild_literals(&mut self, at: usize, lits: &[u8], lp: usize, len: usize) {
         debug_assert!(lp + len + LITERAL_OVERREAD <= lits.len());
-        self.0[at..at + 16].copy_from_slice(&lits[lp..lp + 16]);
-        let mut i = 16;
+        self.0[at..at + 32].copy_from_slice(&lits[lp..lp + 32]);
+        let mut i = 32;
         while i < len {
-            self.0[at + i..at + i + 32].copy_from_slice(&lits[lp + i..lp + i + 32]);
+            let (d, s) = (at + i, lp + i);
+            self.0[d..d + 32].copy_from_slice(&lits[s..s + 32]);
             i += 32;
         }
     }
 
-    /// Copies a match of `len` bytes from `offset` bytes before `at` in
-    /// whole chunks. Requires `1 <= offset <= at - frame_start` and
-    /// `at + len` within the limit.
+    /// Copies a match of `len` bytes from `src`, `offset` bytes before `at`,
+    /// in whole chunks. Requires `1 <= offset <= at` and `at + len` within
+    /// the limit.
     #[inline(always)]
-    fn wild_match(&mut self, at: usize, offset: usize, len: usize, frame_start: usize) {
-        debug_assert!(offset >= 1 && offset <= at - frame_start);
-        let _ = frame_start;
+    fn wild_match(&mut self, at: usize, src: usize, offset: usize, len: usize) {
+        debug_assert!(offset >= 1 && offset <= at && src == at - offset);
         let out = &mut *self.0;
-        let src = at - offset;
         if offset >= 32 {
-            let mut i = 0;
-            loop {
+            chunk::<32>(out, src, at);
+            let mut i = 32;
+            while i < len {
                 chunk::<32>(out, src + i, at + i);
                 i += 32;
-                if i >= len {
-                    break;
-                }
             }
         } else if offset >= 16 {
-            let mut i = 0;
-            loop {
+            chunk::<16>(out, src, at);
+            let mut i = 16;
+            while i < len {
                 chunk::<16>(out, src + i, at + i);
                 i += 16;
-                if i >= len {
-                    break;
-                }
             }
         } else {
             let mut src = src;
@@ -526,6 +526,23 @@ mod tests {
         expected
     }
 
+    /// Runs `f` on the output of a block of at most `max_block` bytes appended
+    /// to `vec`, then cuts `vec` to the output, as `decode_execute_sequences`
+    /// does.
+    fn with_seq_out<const NARROW: bool, R>(
+        vec: &mut Vec<u8>,
+        max_block: usize,
+        frame_start: usize,
+        f: impl FnOnce(&mut SeqOut<'_, NARROW>) -> R,
+    ) -> R {
+        let (base, op) = open_block(vec, max_block, frame_start);
+        let mut out = SeqOut::<NARROW>::new(&mut vec[base..], op);
+        let result = f(&mut out);
+        let end = base + out.op();
+        vec.truncate(end);
+        result
+    }
+
     /// Runs one sequence through `SeqOut::execute` after `prefix`, with
     /// `slack` readable bytes after the literals, and returns the output.
     fn seq_out_run(
@@ -536,18 +553,33 @@ mod tests {
         offset: usize,
         history: &[u8],
     ) -> Result<Vec<u8>, DecompressError> {
+        let narrow = seq_out_run_as::<true>(prefix, lits, slack, ml, offset, history);
+        let wide = seq_out_run_as::<false>(prefix, lits, slack, ml, offset, history);
+        assert_eq!(narrow, wide);
+        narrow
+    }
+
+    fn seq_out_run_as<const NARROW: bool>(
+        prefix: &[u8],
+        lits: &[u8],
+        slack: usize,
+        ml: usize,
+        offset: usize,
+        history: &[u8],
+    ) -> Result<Vec<u8>, DecompressError> {
         let mut buf = lits.to_vec();
         buf.resize(lits.len() + slack, 0xAA);
-        let mut out = SeqOut::new(prefix.to_vec(), lits.len() + ml, 0);
-        let result = out.execute(
-            Literals::new(&buf, lits.len()),
-            0,
-            lits.len(),
-            ml,
-            offset,
-            history,
-        );
-        let v = out.finish();
+        let mut v = prefix.to_vec();
+        let result = with_seq_out::<NARROW, _>(&mut v, lits.len() + ml, 0, |out| {
+            out.execute(
+                Literals::new(&buf, lits.len()),
+                0,
+                lits.len(),
+                ml,
+                offset,
+                history,
+            )
+        });
         result.map(|()| v)
     }
 
@@ -666,44 +698,50 @@ mod tests {
             }
         }
         // A match may not reach before the frame's first byte.
-        let mut out = SeqOut::new(b"abcdef".to_vec(), 8, 4);
+        let mut v = b"abcdef".to_vec();
         let lits = [0u8; LITERAL_OVERREAD];
-        assert_eq!(
-            out.execute(Literals::new(&lits, 0), 0, 0, 4, 3, &[]),
-            Err(DecompressError::InvalidOffset)
-        );
-        assert_eq!(
-            out.execute(Literals::new(&lits, 0), 0, 0, 4, 2, &[]),
-            Ok(())
-        );
-        assert_eq!(out.finish(), b"abcdefefef");
+        with_seq_out::<true, _>(&mut v, 8, 4, |out| {
+            assert_eq!(
+                out.execute(Literals::new(&lits, 0), 0, 0, 4, 3, &[]),
+                Err(DecompressError::InvalidOffset)
+            );
+            assert_eq!(
+                out.execute(Literals::new(&lits, 0), 0, 0, 4, 2, &[]),
+                Ok(())
+            );
+        });
+        assert_eq!(v, b"abcdefefef");
     }
 
     #[test]
     fn seq_out_rejects_overruns() {
         let lits = [7u8; 10];
         // More literals than the section holds.
-        let mut out = SeqOut::new(b"ab".to_vec(), 32, 0);
-        assert_eq!(
-            out.execute(Literals::new(&lits, 10), 4, 8, 3, 1, &[]),
-            Err(DecompressError::CorruptLiterals)
-        );
+        let mut v = b"ab".to_vec();
+        with_seq_out::<true, _>(&mut v, 32, 0, |out| {
+            assert_eq!(
+                out.execute(Literals::new(&lits, 10), 4, 8, 3, 1, &[]),
+                Err(DecompressError::CorruptLiterals)
+            );
+        });
         // A sequence past the block's limit.
-        let mut out = SeqOut::new(b"ab".to_vec(), 8, 0);
-        assert_eq!(
-            out.execute(Literals::new(&lits, 10), 0, 4, 5, 1, &[]),
-            Err(DecompressError::CorruptSequences)
-        );
-        assert_eq!(
-            out.extend_literals(Literals::new(&lits, 10), 0, 9),
-            Err(DecompressError::CorruptSequences)
-        );
-        assert_eq!(
-            out.extend_literals(Literals::new(&lits, 10), 4, 7),
-            Err(DecompressError::CorruptLiterals)
-        );
-        assert_eq!(out.extend_literals(Literals::new(&lits, 10), 4, 6), Ok(()));
-        assert_eq!(out.finish(), b"ab\x07\x07\x07\x07\x07\x07");
+        let mut v = b"ab".to_vec();
+        with_seq_out::<true, _>(&mut v, 8, 0, |out| {
+            assert_eq!(
+                out.execute(Literals::new(&lits, 10), 0, 4, 5, 1, &[]),
+                Err(DecompressError::CorruptSequences)
+            );
+            assert_eq!(
+                out.extend_literals(Literals::new(&lits, 10), 0, 9),
+                Err(DecompressError::CorruptSequences)
+            );
+            assert_eq!(
+                out.extend_literals(Literals::new(&lits, 10), 4, 7),
+                Err(DecompressError::CorruptLiterals)
+            );
+            assert_eq!(out.extend_literals(Literals::new(&lits, 10), 4, 6), Ok(()));
+        });
+        assert_eq!(v, b"ab\x07\x07\x07\x07\x07\x07");
     }
 
     #[test]

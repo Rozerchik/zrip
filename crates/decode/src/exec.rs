@@ -1,7 +1,7 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use crate::fast_vec::{BlockOutput, Literals, SeqOut};
+use crate::fast_vec::{BlockOutput, Literals, SeqOut, open_block};
 use crate::sequences::{SequenceDecodeTables, compute_offset};
 use zrip_core::bitstream::reader_reverse::ReverseBitReader;
 use zrip_core::error::DecompressError;
@@ -15,38 +15,32 @@ pub(crate) struct SequenceOutputScope<'a> {
     pub(crate) history: &'a [u8],
 }
 
-/// Width of [`SeqBits`]' container in bits.
-const CONTAINER_BITS: u32 = 64;
-
 /// Most extra bits a sequence reads before its literal length without a
-/// second refill, given the state bits that follow: C zstd's
+/// second word, given the state bits that follow: C zstd's
 /// `64 - 7 - (LLFSELog + MLFSELog + OffFSELog)`.
 const MID_RELOAD_THRESHOLD: u32 = 64 - 7 - (9 + 9 + 8);
 
-/// Backward reader for the sequences bitstream, C zstd's `BIT_DStream_t`.
-///
-/// The container holds the stream bytes `pos..pos + 8`, its low `avail` bits
-/// unread. Counting unread bits makes a read one shift and one mask. It is a
-/// small `Copy` value and takes the stream per refill, so the loop keeps it
-/// in registers. Reads past the stream's start make `avail` wrap below zero,
-/// where it stays, so [`SeqBits::is_exhausted`] rejects the stream.
+/// Fewest unread bits a [`Word`] holds while the stream has that many.
+const WORD_BITS: usize = 57;
+
+/// Backward reader for the sequences bitstream, C zstd's `BIT_DStream_t`
+/// reduced to the count of unread bits. Each sequence loads the word that
+/// holds its bits ([`SeqBits::word`]), so the loop carries one number
+/// instead of a container, its fill, and a position. Reads past the
+/// stream's start make the count wrap to a huge value, which never comes
+/// back to zero, so [`SeqBits::is_exhausted`] rejects the stream.
 #[derive(Clone, Copy)]
 struct SeqBits {
-    container: u64,
-    avail: u32,
-    pos: usize,
+    left: usize,
 }
 
-/// The eight bytes at `src[pos..]` as a little-endian word, or zero when they
-/// are not all there, which the refills never ask for. Masking `pos` to 32
-/// bits lets the compiler see that `pos + 8` cannot overflow.
-#[inline(always)]
-fn read64(src: &[u8], pos: usize) -> u64 {
-    let pos = pos & u32::MAX as usize;
-    match src.get(pos..pos + 8) {
-        Some(word) => u64::from_le_bytes(word.try_into().unwrap_or([0; 8])),
-        None => 0,
-    }
+/// The stream bytes `pos..pos + 8` as a little-endian word, its low `avail`
+/// bits unread.
+#[derive(Clone, Copy)]
+struct Word {
+    container: u64,
+    avail: usize,
+    pos: usize,
 }
 
 impl SeqBits {
@@ -57,75 +51,53 @@ impl SeqBits {
         if last == 0 {
             return None;
         }
-        let marker = last.leading_zeros() + 1;
-        if src.len() >= 8 {
-            let pos = src.len() - 8;
-            return Some(Self {
-                container: read64(src, pos),
-                avail: CONTAINER_BITS - marker,
-                pos,
-            });
-        }
-        let container = src
-            .iter()
-            .rev()
-            .fold(0u64, |word, &byte| (word << 8) | u64::from(byte));
         Some(Self {
-            container,
-            avail: CONTAINER_BITS - marker - (8 - src.len() as u32) * 8,
-            pos: 0,
+            left: src.len() * 8 - (last.leading_zeros() as usize + 1),
         })
     }
 
-    /// Reads `count <= 31` bits.
+    /// The word holding the next [`WORD_BITS`] unread bits, or all of them
+    /// near the start. Requires `src.len() >= 8`.
     #[inline(always)]
-    fn read(&mut self, count: u32) -> u32 {
-        let start = self.avail.wrapping_sub(count);
-        self.avail = start;
-        ((self.container >> (start & 63)) & ((1u64 << count) - 1)) as u32
-    }
-
-    /// Refills a whole word while one is left before the start, else as far
-    /// as the stream allows. Callers read at most 57 bits between refills, so
-    /// while `pos >= 8` nothing was read past the start yet.
-    #[inline(always)]
-    fn reload(&mut self, src: &[u8]) {
-        if self.pos >= 8 {
-            let bytes = (CONTAINER_BITS - self.avail) >> 3;
-            self.pos -= bytes as usize;
-            self.avail += bytes * 8;
-            self.container = read64(src, self.pos);
+    fn word(self, src: &[u8]) -> Word {
+        let pos = if unlikely(self.left < WORD_BITS) {
+            0
         } else {
-            *self = self.reload_tail(src);
+            (self.left - WORD_BITS) >> 3
+        };
+        // A valid count keeps `pos` below the clamp; a wrapped one reads
+        // any word.
+        let pos = pos.min(src.len() - 8);
+        let word = src[pos..pos + 8].try_into().unwrap_or([0; 8]);
+        Word {
+            container: u64::from_le_bytes(word),
+            avail: self.left.wrapping_sub(pos * 8),
+            pos,
         }
-    }
-
-    /// The end of [`Self::reload`] near the stream's start; by value, so the
-    /// hot loop keeps the container in registers.
-    #[cold]
-    #[inline(never)]
-    fn reload_tail(mut self, src: &[u8]) -> Self {
-        if self.pos == 0 || self.avail > CONTAINER_BITS {
-            return self;
-        }
-        let wanted = ((CONTAINER_BITS - self.avail) >> 3) as usize;
-        let step = wanted.min(self.pos);
-        self.pos -= step;
-        self.avail += (step as u32) * 8;
-        self.container = read64(src, self.pos);
-        self
     }
 
     /// Whether every bit was read, and no more.
     #[inline]
-    fn is_exhausted(&self) -> bool {
-        self.pos == 0 && self.avail == 0
+    fn is_exhausted(self) -> bool {
+        self.left == 0
+    }
+}
+
+impl Word {
+    /// Reads `count <= 31` bits.
+    #[inline(always)]
+    fn read(&mut self, count: u32) -> u32 {
+        let start = self.avail.wrapping_sub(count as usize);
+        self.avail = start;
+        ((self.container >> (start & 63)) & ((1u64 << count) - 1)) as u32
     }
 
-    /// Bits left in the stream, when nothing was read past its start.
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.avail as usize + self.pos * 8
+    /// The reader after this word's reads.
+    #[inline(always)]
+    fn bits(&self) -> SeqBits {
+        SeqBits {
+            left: (self.pos * 8).wrapping_add(self.avail),
+        }
     }
 }
 
@@ -146,26 +118,50 @@ pub(crate) fn decode_execute_sequences<const HAS_HISTORY: bool>(
     let state_bits = u32::from(tables.ll_accuracy)
         + u32::from(tables.of_accuracy)
         + u32::from(tables.ml_accuracy);
-    if bits.remaining() < state_bits as usize {
+    if bits.left < state_bits as usize {
         return Err(DecompressError::InputExhausted);
     }
+    // A short stream is read from a zero-padded copy.
+    let mut padded = [0u8; 8];
+    let data = if data.len() < 8 {
+        padded[..data.len()].copy_from_slice(data);
+        &padded[..]
+    } else {
+        data
+    };
     let history = if HAS_HISTORY { scope.history } else { &[] };
-    let mut out = SeqOut::new(
-        core::mem::take(output),
-        scope.max_block_output,
-        scope.output_base,
-    );
-    let result = run_sequences(
-        bits,
-        data,
-        num_sequences,
-        tables,
-        offsets,
-        literals,
-        &mut out,
-        history,
-    );
-    *output = out.finish();
+    let mut vec = core::mem::take(output);
+    let (base, op) = open_block(&mut vec, scope.max_block_output, scope.output_base);
+    // No closure here: the loop must inline into the `fearless_simd` body.
+    let (result, op) = if u32::try_from(vec.len()).is_ok() {
+        let mut out = SeqOut::<true>::new(&mut vec[base..], op);
+        let result = run_sequences(
+            bits,
+            data,
+            num_sequences,
+            tables,
+            offsets,
+            literals,
+            &mut out,
+            history,
+        );
+        (result, out.op())
+    } else {
+        let mut out = SeqOut::<false>::new(&mut vec[base..], op);
+        let result = run_sequences(
+            bits,
+            data,
+            num_sequences,
+            tables,
+            offsets,
+            literals,
+            &mut out,
+            history,
+        );
+        (result, out.op())
+    };
+    vec.truncate(base + op);
+    *output = vec;
     result
 }
 
@@ -180,8 +176,8 @@ struct SeqDecoder {
 
 impl SeqDecoder {
     /// Decodes one sequence as `(literal length, match length, offset)`,
-    /// C zstd's `ZSTD_decodeSequence`. With `UPDATE` the states advance and
-    /// the container is refilled; the block's last sequence does neither.
+    /// C zstd's `ZSTD_decodeSequence`. With `UPDATE` the states advance;
+    /// the block's last sequence keeps them.
     #[inline(always)]
     fn decode<const UPDATE: bool>(
         &mut self,
@@ -189,6 +185,7 @@ impl SeqDecoder {
         data: &[u8],
         tables: &SequenceDecodeTables,
     ) -> (usize, usize, usize) {
+        let mut w = b.word(data);
         macro_rules! table_entry {
             ($table:expr, $state:expr) => {{
                 let idx = ($state & FSE_SEQ_TABLE_MASK) as usize;
@@ -199,14 +196,14 @@ impl SeqDecoder {
         let ml_e = table_entry!(tables.ml_table, self.ml_state);
         let ll_e = table_entry!(tables.ll_table, self.ll_state);
         let of_bits = of_e.extra_bits.get();
-        let offset_value = of_e.baseline_value + b.read(of_bits);
+        let offset_value = of_e.baseline_value + w.read(of_bits);
         let ml_bits = ml_e.extra_bits.get();
-        let match_length = ml_e.baseline_value + b.read(ml_bits);
+        let match_length = ml_e.baseline_value + w.read(ml_bits);
         let ll_bits = ll_e.extra_bits.get();
         if ll_bits + ml_bits + of_bits > MID_RELOAD_THRESHOLD {
-            b.reload(data);
+            w = w.bits().word(data);
         }
-        let literal_length = ll_e.baseline_value + b.read(ll_bits);
+        let literal_length = ll_e.baseline_value + w.read(ll_bits);
 
         let [rep0, rep1, rep2] = self.rep;
         let offset = if likely(offset_value > 3) {
@@ -232,11 +229,11 @@ impl SeqDecoder {
 
         if UPDATE {
             // The format's order: literal length, match length, offset.
-            self.ll_state = u32::from(ll_e.base_line) + b.read(ll_e.num_bits.get());
-            self.ml_state = u32::from(ml_e.base_line) + b.read(ml_e.num_bits.get());
-            self.of_state = u32::from(of_e.base_line) + b.read(of_e.num_bits.get());
-            b.reload(data);
+            self.ll_state = u32::from(ll_e.base_line) + w.read(ll_e.num_bits.get());
+            self.ml_state = u32::from(ml_e.base_line) + w.read(ml_e.num_bits.get());
+            self.of_state = u32::from(of_e.base_line) + w.read(of_e.num_bits.get());
         }
+        *b = w.bits();
         (
             literal_length as usize,
             match_length as usize,
@@ -246,29 +243,33 @@ impl SeqDecoder {
 }
 
 /// The sequence loop of [`decode_execute_sequences`], C zstd's
-/// `ZSTD_decompressSequences_body`: one refill per sequence, a second one
-/// only when its extra bits could exhaust the container, and the last
+/// `ZSTD_decompressSequences_body`: one word per sequence, a second one
+/// only when its extra bits could exhaust the first, and the last
 /// sequence peeled off so the loop never tests for it.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn run_sequences(
+fn run_sequences<const NARROW: bool>(
     bits: SeqBits,
     data: &[u8],
     num_sequences: u32,
     tables: &SequenceDecodeTables,
     offsets: &mut [u32; 3],
     literals: Literals<'_>,
-    out: &mut SeqOut,
+    out: &mut SeqOut<'_, NARROW>,
     history: &[u8],
 ) -> Result<(), DecompressError> {
-    let mut b = bits;
+    if data.len() < 8 {
+        // The caller pads short streams; this tells the compiler.
+        return Err(DecompressError::CorruptSequences);
+    }
+    let mut w = bits.word(data);
     let mut dec = SeqDecoder {
-        ll_state: b.read(u32::from(tables.ll_accuracy)),
-        of_state: b.read(u32::from(tables.of_accuracy)),
-        ml_state: b.read(u32::from(tables.ml_accuracy)),
+        ll_state: w.read(u32::from(tables.ll_accuracy)),
+        of_state: w.read(u32::from(tables.of_accuracy)),
+        ml_state: w.read(u32::from(tables.ml_accuracy)),
         rep: *offsets,
     };
-    b.reload(data);
+    let mut b = w.bits();
 
     let mut lp: usize = 0;
     let mut left = num_sequences - 1;
