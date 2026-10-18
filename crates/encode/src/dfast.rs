@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 #[cfg(feature = "alloc")]
 use alloc::vec;
 #[cfg(feature = "alloc")]
@@ -13,55 +11,55 @@ use zrip_core::hash::{PRIME32_1, PRIME64_1};
 
 macro_rules! rd32 {
     ($src:expr, $pos:expr) => {
-        paranoid_unsafe_call!(primitives::rd32($src, $pos))
+        primitives::rd32($src, $pos)
     };
 }
 
 macro_rules! rd64 {
     ($src:expr, $pos:expr) => {
-        paranoid_unsafe_call!(primitives::rd64($src, $pos))
+        primitives::rd64($src, $pos)
     };
 }
 
 macro_rules! rd32_upto {
     ($src:expr, $pos:expr, $limit:expr) => {
-        paranoid_unsafe_call!(primitives::rd32_upto($src, $pos, $limit))
+        primitives::rd32_upto($src, $pos, $limit)
     };
 }
 
 macro_rules! rd64_upto {
     ($src:expr, $pos:expr, $limit:expr) => {
-        paranoid_unsafe_call!(primitives::rd64_upto($src, $pos, $limit))
+        primitives::rd64_upto($src, $pos, $limit)
     };
 }
 
 macro_rules! rd32_again {
     ($src:expr, $pos:expr, $v:expr) => {
-        paranoid_unsafe_call!(primitives::rd32_again($src, $pos, $v))
+        primitives::rd32_again($src, $pos, $v)
     };
 }
 
 macro_rules! rd64_again {
     ($src:expr, $pos:expr, $v:expr) => {
-        paranoid_unsafe_call!(primitives::rd64_again($src, $pos, $v))
+        primitives::rd64_again($src, $pos, $v)
     };
 }
 
 macro_rules! hash_load {
     ($table:expr, $idx:expr) => {
-        paranoid_unsafe_call!(primitives::hash_load($table, $idx))
+        primitives::hash_load($table, $idx)
     };
 }
 
 macro_rules! hash_store {
     ($table:expr, $idx:expr, $val:expr) => {
-        paranoid_unsafe_call!(primitives::hash_store($table, $idx, $val))
+        primitives::hash_store($table, $idx, $val)
     };
 }
 
 macro_rules! count_match {
     ($src:expr, $p1:expr, $p2:expr, $limit:expr) => {
-        paranoid_unsafe_call!(primitives::count_match($src, $p1, $p2, $limit))
+        primitives::count_match($src, $p1, $p2, $limit)
     };
 }
 
@@ -476,9 +474,8 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             break;
         }
 
-        // Bytes at ip0 and ip1 for the hashes. The paranoid build reuses them
-        // for the match checks through `rd32_again` and `rd64_again`, skipping
-        // bounds checks.
+        // Bytes at ip0 and ip1 for the hashes, reused for the match checks
+        // through `rd32_again` and `rd64_again`, skipping bounds checks.
         let mut v0 = rd64_upto!(src, ip0, ilimit);
         let mut v1 = rd64_upto!(src, ip1, ilimit);
         let mut hs0 = short_hash_val::<MLS>(v0, short_log);
@@ -651,12 +648,6 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             ip1 = ip2;
             ip2 = ip3;
 
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            {
-                primitives::prefetch_ht(hash_short, hs1);
-                primitives::prefetch_ht(hash_long, hl1);
-            }
-
             // --- Store hashes for shifted ip0 ---
             hash_store!(hash_short, hs0, ip0 as u32);
             hash_store!(hash_long, hl0, ip0 as u32);
@@ -795,12 +786,6 @@ fn compress_dfast_block_impl<const HASH_LOG: u32, const SHORT_LOG: u32, const ML
             let step = step_size + ((ip0 - anchor) >> skip_shift);
             ip2 = ip0 + step;
             ip3 = ip1 + step;
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            {
-                primitives::prefetch_ht(hash_short, hs1);
-                primitives::prefetch_ht(hash_long, hl1);
-            }
 
             if ip3 >= ilimit {
                 break;

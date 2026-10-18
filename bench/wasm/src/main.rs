@@ -5,9 +5,6 @@ use std::time::Instant;
 const ZRIP_LEVELS: &[i32] = &[-8, -7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
 const C_ZSTD_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
 
-#[cfg(feature = "paranoid")]
-const ZRIP_CODEC: &str = "zrip paranoid";
-#[cfg(not(feature = "paranoid"))]
 const ZRIP_CODEC: &str = "zrip";
 
 fn main() {
@@ -151,7 +148,7 @@ fn want_codec(run_all: bool, codec_filter: &[String], name: &str) -> bool {
 
 fn levels_for_codec(codec: &str, level_filter: &[i32]) -> Vec<i32> {
     let default_levels = match codec {
-        "zrip" | "zrip paranoid" => ZRIP_LEVELS,
+        "zrip" => ZRIP_LEVELS,
         "C zstd" | "structured-zstd" => C_ZSTD_LEVELS,
         "ruzstd" => &[1],
         _ => &[1],

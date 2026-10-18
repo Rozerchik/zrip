@@ -3,25 +3,11 @@ use alloc::vec::Vec;
 
 use super::HuffmanDecodeEntry;
 
-#[cfg(not(feature = "paranoid"))]
 #[inline(always)]
 pub(crate) fn huf_table_lookup(table: &[HuffmanDecodeEntry], idx: usize) -> HuffmanDecodeEntry {
     table[idx]
 }
 
-#[cfg(feature = "paranoid")]
-#[inline(always)]
-pub(crate) fn huf_table_lookup(table: &[HuffmanDecodeEntry], idx: usize) -> HuffmanDecodeEntry {
-    table[idx]
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) fn huf_output_write(output: &mut [u8], pos: usize, val: u8) {
-    output[pos] = val;
-}
-
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn huf_output_write(output: &mut [u8], pos: usize, val: u8) {
     output[pos] = val;

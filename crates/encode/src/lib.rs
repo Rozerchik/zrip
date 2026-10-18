@@ -1,24 +1,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(feature = "nightly", feature(optimize_attribute))]
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![forbid(unsafe_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
-
-#[cfg(not(feature = "paranoid"))]
-macro_rules! paranoid_unsafe_call {
-    ($e:expr) => {
-        unsafe { $e }
-    };
-}
-
-#[cfg(feature = "paranoid")]
-macro_rules! paranoid_unsafe_call {
-    ($e:expr) => {
-        $e
-    };
-}
 
 /// Evaluates `$body` compiled for x86-64-v3 (AVX2, BMI1/2, LZCNT) when the CPU
 /// supports it, and compiled for the build target otherwise.

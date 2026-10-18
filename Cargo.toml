@@ -23,6 +23,8 @@ frame = ["std", "zrip-encode/frame", "zrip-decode/frame"]
 ldm = ["std", "zrip-encode/ldm"]
 dict_builder = ["std", "zrip-core/dict_builder"]
 nightly = ["zrip-core/nightly", "zrip-encode/nightly", "zrip-decode/nightly"]
+# No effect today: every build is safe Rust. Kept so existing feature lists
+# build, and to keep any future `unsafe` out of builds that enable it.
 paranoid = ["zrip-core/paranoid", "zrip-encode/paranoid", "zrip-decode/paranoid"]
 
 [dependencies]
@@ -84,10 +86,6 @@ path = "examples/profile_xray.rs"
 required-features = ["std"]
 
 [[test]]
-name = "zrip_a_miri_ub"
-path = "tests/a_miri_ub.rs"
-
-[[test]]
 name = "zrip_adversarial"
 path = "tests/adversarial.rs"
 
@@ -123,9 +121,6 @@ path = "tests/spec_conformance.rs"
 name = "zrip_streaming"
 path = "tests/streaming.rs"
 
-[workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
-
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 # Casts are pervasive and intentional in a codec operating on fixed-width fields.
@@ -134,10 +129,6 @@ cast_possible_wrap = "allow"
 cast_sign_loss = "allow"
 cast_lossless = "allow"
 cast_precision_loss = "allow"
-# Raw pointer casts in unsafe primitives and SIMD intrinsics.
-ptr_as_ptr = "allow"
-ptr_cast_constness = "allow"
-cast_ptr_alignment = "allow"
 # Hot-path primitives need guaranteed inlining.
 inline_always = "allow"
 # Codec functions are inherently long.

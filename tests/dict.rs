@@ -593,5 +593,5 @@ fn frame_decoder_dict_repeated_identical_frames() {
     let mut decoder = zrip::FrameDecoder::with_dict(stream.as_slice(), dict);
     let mut output = Vec::new();
     decoder.read_to_end(&mut output).unwrap();
-    assert!(output == data.repeat(3));
+    assert_eq!(output, data.repeat(3));
 }

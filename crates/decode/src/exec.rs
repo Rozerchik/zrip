@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
@@ -194,7 +192,7 @@ impl SeqDecoder {
         macro_rules! table_entry {
             ($table:expr, $state:expr) => {{
                 let idx = ($state & FSE_SEQ_TABLE_MASK) as usize;
-                *paranoid_unsafe_call!($table.get(idx))
+                *$table.get(idx)
             }};
         }
         let of_e = table_entry!(tables.of_table, self.of_state);
@@ -320,7 +318,7 @@ pub(crate) fn decode_execute_single_sequence<const HAS_HISTORY: bool>(
     macro_rules! table_entry {
         ($table:expr, $state:expr) => {{
             let idx = ($state & FSE_SEQ_TABLE_MASK) as usize;
-            paranoid_unsafe_call!($table.get(idx))
+            $table.get(idx)
         }};
     }
 

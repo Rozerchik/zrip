@@ -1,52 +1,20 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn rd32(src: &[u8], pos: usize) -> u32 {
-    debug_assert!(pos + 4 <= src.len());
-    // SAFETY: The caller guarantees pos..pos+4 is inside src. read_unaligned
-    // permits any byte alignment.
-    unsafe { (src.as_ptr().add(pos) as *const u32).read_unaligned() }
-}
-
-// Native byte order, like the unaligned reads above, so both builds hash and
-// compare the same bytes.
-#[cfg(feature = "paranoid")]
+// Native byte order, like C zstd's `MEM_read32`.
 #[inline(always)]
 pub(crate) fn rd32(src: &[u8], pos: usize) -> u32 {
     u32::from_ne_bytes(*src[pos..].first_chunk::<4>().unwrap())
 }
 
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn rd64(src: &[u8], pos: usize) -> u64 {
-    debug_assert!(pos + 8 <= src.len());
-    // SAFETY: The caller guarantees pos..pos+8 is inside src. read_unaligned
-    // permits any byte alignment.
-    unsafe { (src.as_ptr().add(pos) as *const u64).read_unaligned() }
-}
-
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd64(src: &[u8], pos: usize) -> u64 {
     u64::from_ne_bytes(*src[pos..].first_chunk::<8>().unwrap())
 }
 
 /// `rd64(src, pos)` for a `pos` the caller knows is at most `limit`, where
-/// the compiler sees `limit + 8 <= src.len()`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn rd64_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
-    debug_assert!(pos <= limit && limit + 8 <= src.len());
-    // SAFETY: pos <= limit and limit + 8 <= src.len().
-    unsafe { rd64(src, pos) }
-}
-
-/// `rd64(src, pos)` for a `pos` the caller knows is at most `limit`, where
 /// the compiler sees `limit + 8 <= src.len()`. Reading at `pos.min(limit)`
 /// turns both bounds checks into one conditional move.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd64_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
     debug_assert!(pos <= limit);
@@ -54,16 +22,6 @@ pub(crate) fn rd64_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
 }
 
 /// `rd32(src, pos)` for a `pos` at most `limit`, like `rd64_upto`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn rd32_upto(src: &[u8], pos: usize, limit: usize) -> u32 {
-    debug_assert!(pos <= limit && limit + 8 <= src.len());
-    // SAFETY: pos <= limit and limit + 8 <= src.len().
-    unsafe { rd32(src, pos) }
-}
-
-/// `rd32(src, pos)` for a `pos` at most `limit`, like `rd64_upto`.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd32_upto(src: &[u8], pos: usize, limit: usize) -> u32 {
     debug_assert!(pos <= limit);
@@ -78,66 +36,27 @@ pub(crate) fn first4(v: u64) -> u32 {
     u32::from_ne_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// Eight bytes at `pos`, read ahead for `rd32_again` and `rd64_again`. This
-/// build reads at those calls instead, so it reads nothing here and keeps no
-/// address in a register until then.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) fn rd64_ahead(_src: &[u8], _pos: usize) -> u64 {
-    0
-}
-
 /// Eight bytes at `pos`, read once for `rd32_again` and `rd64_again`.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd64_ahead(src: &[u8], pos: usize) -> u64 {
     rd64(src, pos)
 }
 
 /// `rd64_ahead` for a `pos` at most `limit`, as in `rd64_upto`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) fn rd64_ahead_upto(_src: &[u8], _pos: usize, _limit: usize) -> u64 {
-    0
-}
-
-/// `rd64_ahead` for a `pos` at most `limit`, as in `rd64_upto`.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd64_ahead_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
     rd64_upto(src, pos, limit)
 }
 
-/// `rd32(src, pos)`. The paranoid build takes it from `v`, the eight bytes
-/// read there before. This build reads again, which is cheaper than keeping
-/// `v` in a register through the match checks, and ignores `v`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn rd32_again(src: &[u8], pos: usize, _v: u64) -> u32 {
-    // SAFETY: The caller read eight bytes at pos, so four are in bounds.
-    unsafe { rd32(src, pos) }
-}
-
 /// `rd32(src, pos)` where `v` holds `rd64(src, pos)`, taken from `v` to skip
 /// a bounds check.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd32_again(_src: &[u8], _pos: usize, v: u64) -> u32 {
     first4(v)
 }
 
-/// `rd64(src, pos)`. This build reads again and ignores `v`, like
-/// `rd32_again`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn rd64_again(src: &[u8], pos: usize, _v: u64) -> u64 {
-    // SAFETY: The caller read eight bytes at pos before.
-    unsafe { rd64(src, pos) }
-}
-
 /// `rd64(src, pos)` where `v` already holds it, returned to skip a bounds
 /// check.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn rd64_again(_src: &[u8], _pos: usize, v: u64) -> u64 {
     v
@@ -145,17 +64,7 @@ pub(crate) fn rd64_again(_src: &[u8], _pos: usize, v: u64) -> u64 {
 
 /// `table` cut to exactly `1 << LOG` entries when `LOG` is a constant, so
 /// the compiler sees that a `LOG`-bit hash indexes in bounds and drops the
-/// checks of safe indexing. This build indexes unchecked and keeps `table`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) fn exact_table<const LOG: u32>(table: &mut [u32]) -> &mut [u32] {
-    table
-}
-
-/// `table` cut to exactly `1 << LOG` entries when `LOG` is a constant, so
-/// the compiler sees that a `LOG`-bit hash indexes in bounds and drops the
 /// checks of safe indexing.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn exact_table<const LOG: u32>(table: &mut [u32]) -> &mut [u32] {
     if LOG != 0 {
@@ -165,90 +74,16 @@ pub(crate) fn exact_table<const LOG: u32>(table: &mut [u32]) -> &mut [u32] {
     }
 }
 
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn hash_load(table: &[u32], idx: usize) -> u32 {
-    debug_assert!(idx < table.len());
-    // SAFETY: The caller guarantees idx is in bounds.
-    unsafe { *table.get_unchecked(idx) }
-}
-
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn hash_load(table: &[u32], idx: usize) -> u32 {
     table[idx]
 }
 
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn hash_store(table: &mut [u32], idx: usize, val: u32) {
-    debug_assert!(idx < table.len());
-    // SAFETY: The caller guarantees idx is in bounds.
-    unsafe { *table.get_unchecked_mut(idx) = val }
-}
-
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn hash_store(table: &mut [u32], idx: usize, val: u32) {
     table[idx] = val;
 }
 
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-pub(crate) unsafe fn count_match(src: &[u8], p1: usize, p2: usize, limit: usize) -> usize {
-    debug_assert!(p1 <= limit && limit <= src.len());
-    debug_assert!(p2 < p1, "match position must be behind cursor");
-    debug_assert!(p2 < src.len());
-    let src_ptr = src.as_ptr();
-    // SAFETY: p1..limit and p2.. are inside src, and p2 is behind p1. The raw
-    // matcher only reads as far as p1 reaches limit.
-    unsafe { count_match_raw(src_ptr.add(p1), src_ptr.add(p2), src_ptr.add(limit)) }
-}
-
-/// # Safety
-///
-/// `p_in..p_in_limit` must be inside one allocation, and `p_match` must point
-/// to an earlier position in the same allocation with enough trailing bytes to
-/// compare until `p_in_limit`.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn count_match_raw(
-    mut p_in: *const u8,
-    mut p_match: *const u8,
-    p_in_limit: *const u8,
-) -> usize {
-    debug_assert!(p_match < p_in);
-    debug_assert!(p_in <= p_in_limit);
-    // SAFETY: The caller supplies pointers from one slice with p_in <=
-    // p_in_limit. fast_len is rounded down from that in-bounds span, so no
-    // pointer is formed before the allocation for short matches.
-    unsafe {
-        let p_start = p_in;
-        let max_len = p_in_limit.offset_from(p_in) as usize;
-        let fast_len = max_len & !7;
-        let fast_limit = p_in.add(fast_len);
-
-        while p_in < fast_limit {
-            let diff =
-                (p_in as *const u64).read_unaligned() ^ (p_match as *const u64).read_unaligned();
-            if diff != 0 {
-                return p_in.offset_from(p_start) as usize + (diff.trailing_zeros() >> 3) as usize;
-            }
-            p_in = p_in.add(8);
-            p_match = p_match.add(8);
-        }
-        while p_in < p_in_limit {
-            if *p_in != *p_match {
-                break;
-            }
-            p_in = p_in.add(1);
-            p_match = p_match.add(1);
-        }
-        p_in.offset_from(p_start) as usize
-    }
-}
-
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 pub(crate) fn count_match(src: &[u8], p1: usize, p2: usize, limit: usize) -> usize {
     debug_assert!(p1 <= limit && limit <= src.len());
@@ -283,45 +118,6 @@ pub(crate) fn assert_rep_valid(r0: u32, r1: u32) {
 fn cold_rep_panic(r0: u32, r1: u32) -> ! {
     panic!("rep offsets must be non-zero: r0={r0}, r1={r1}");
 }
-
-#[cfg(all(target_arch = "x86_64", not(miri), not(feature = "paranoid")))]
-#[inline(always)]
-pub(crate) fn prefetch_ht(table: &[u32], idx: usize) {
-    if let Some(slot) = table.get(idx) {
-        // SAFETY: slot comes from a valid shared reference. Prefetch is only a
-        // cache hint and does not mutate through the pointer.
-        unsafe {
-            core::arch::x86_64::_mm_prefetch(
-                core::ptr::from_ref(slot).cast::<i8>(),
-                core::arch::x86_64::_MM_HINT_T0,
-            );
-        }
-    }
-}
-
-#[cfg(all(target_arch = "aarch64", not(miri), not(feature = "paranoid")))]
-#[inline(always)]
-pub(crate) fn prefetch_ht(table: &[u32], idx: usize) {
-    if let Some(slot) = table.get(idx) {
-        // SAFETY: slot comes from a valid shared reference, and the inline
-        // assembly emits only an AArch64 prefetch hint for that address.
-        unsafe {
-            let ptr = core::ptr::from_ref(slot).cast::<u8>();
-            core::arch::asm!("prfm pldl1keep, [{x}]", x = in(reg) ptr, options(nostack, preserves_flags));
-        }
-    }
-}
-
-#[cfg(any(
-    all(
-        any(miri, feature = "paranoid"),
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ),
-    not(any(target_arch = "x86_64", target_arch = "aarch64"))
-))]
-#[inline(always)]
-#[allow(dead_code)]
-pub(crate) fn prefetch_ht(_table: &[u32], _idx: usize) {}
 
 /// Forward bit-output buffer for sequence bitstreams.
 ///
@@ -384,13 +180,6 @@ impl<'a> BitstreamScratch<'a> {
 mod tests {
     use super::count_match;
 
-    #[cfg(not(feature = "paranoid"))]
-    fn test_count_match(src: &[u8], p1: usize, p2: usize, limit: usize) -> usize {
-        // SAFETY: test cases pass in-bounds positions with p2 behind p1.
-        unsafe { count_match(src, p1, p2, limit) }
-    }
-
-    #[cfg(feature = "paranoid")]
     fn test_count_match(src: &[u8], p1: usize, p2: usize, limit: usize) -> usize {
         count_match(src, p1, p2, limit)
     }
@@ -411,78 +200,5 @@ mod tests {
 
         assert_eq!(test_count_match(src, 8, 0, 16), 8);
         assert_eq!(test_count_match(src, 8, 0, 17), 8);
-    }
-}
-
-// Run with: cargo kani -p zrip-encode -j4 --output-format terse
-#[cfg(all(kani, not(feature = "paranoid")))]
-mod kani_proofs {
-    use super::*;
-
-    // -- Unaligned reads --
-
-    /// read_unaligned at pos..pos+4 stays within src.
-    #[kani::proof]
-    fn rd32_no_oob() {
-        let src = [0u8; 8];
-        let pos: usize = kani::any();
-        kani::assume(pos <= 4);
-        unsafe {
-            rd32(&src, pos);
-        }
-    }
-
-    /// read_unaligned at pos..pos+8 stays within src.
-    #[kani::proof]
-    fn rd64_no_oob() {
-        let src = [0u8; 16];
-        let pos: usize = kani::any();
-        kani::assume(pos <= 8);
-        unsafe {
-            rd64(&src, pos);
-        }
-    }
-
-    // -- Hash table unchecked access --
-
-    /// get_unchecked in hash_load stays within table.
-    #[kani::proof]
-    fn hash_load_no_oob() {
-        let table = [0u32; 16];
-        let idx: usize = kani::any();
-        kani::assume(idx < 16);
-        unsafe {
-            hash_load(&table, idx);
-        }
-    }
-
-    /// get_unchecked_mut in hash_store stays within table.
-    #[kani::proof]
-    fn hash_store_no_oob() {
-        let mut table = [0u32; 16];
-        let idx: usize = kani::any();
-        kani::assume(idx < 16);
-        unsafe {
-            hash_store(&mut table, idx, kani::any());
-        }
-    }
-
-    // -- Match counting --
-
-    /// 8-byte fast loop and byte tail in count_match_raw never read
-    /// past the limit or outside the source allocation.
-    #[kani::proof]
-    #[kani::unwind(9)] // fast loop: 32/8 = 4 max; byte tail: 7 max
-    fn count_match_no_oob() {
-        let src = [0u8; 32];
-        let p1: usize = kani::any();
-        let p2: usize = kani::any();
-        let limit: usize = kani::any();
-        kani::assume(limit <= 32);
-        kani::assume(p1 <= limit);
-        kani::assume(p2 < p1);
-        unsafe {
-            count_match(&src, p1, p2, limit);
-        }
     }
 }

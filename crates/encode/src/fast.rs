@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 #[cfg(feature = "alloc")]
 use alloc::vec;
 #[cfg(feature = "alloc")]
@@ -14,43 +12,43 @@ use zrip_core::hint::unlikely;
 
 macro_rules! rd32 {
     ($src:expr, $pos:expr) => {
-        paranoid_unsafe_call!(primitives::rd32($src, $pos))
+        primitives::rd32($src, $pos)
     };
 }
 
 macro_rules! rd64 {
     ($src:expr, $pos:expr) => {
-        paranoid_unsafe_call!(primitives::rd64($src, $pos))
+        primitives::rd64($src, $pos)
     };
 }
 
 macro_rules! rd32_again {
     ($src:expr, $pos:expr, $v:expr) => {
-        paranoid_unsafe_call!(primitives::rd32_again($src, $pos, $v))
+        primitives::rd32_again($src, $pos, $v)
     };
 }
 
 macro_rules! rd64_again {
     ($src:expr, $pos:expr, $v:expr) => {
-        paranoid_unsafe_call!(primitives::rd64_again($src, $pos, $v))
+        primitives::rd64_again($src, $pos, $v)
     };
 }
 
 macro_rules! hash_load {
     ($table:expr, $idx:expr) => {
-        paranoid_unsafe_call!(primitives::hash_load($table, $idx))
+        primitives::hash_load($table, $idx)
     };
 }
 
 macro_rules! hash_store {
     ($table:expr, $idx:expr, $val:expr) => {
-        paranoid_unsafe_call!(primitives::hash_store($table, $idx, $val))
+        primitives::hash_store($table, $idx, $val)
     };
 }
 
 macro_rules! count_match {
     ($src:expr, $p1:expr, $p2:expr, $limit:expr) => {
-        paranoid_unsafe_call!(primitives::count_match($src, $p1, $p2, $limit))
+        primitives::count_match($src, $p1, $p2, $limit)
     };
 }
 
@@ -532,8 +530,8 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             break;
         }
 
-        // Bytes at ip0 and ip1 for the hashes. The paranoid build reuses them
-        // for the match checks through `rd32_again`, skipping bounds checks.
+        // Bytes at ip0 and ip1 for the hashes, reused for the match checks
+        // through `rd32_again`, skipping bounds checks.
         let mut v0 = rd64!(src, ip0);
         let mut v1 = rd64!(src, ip1);
         let mut h0 = hash_val::<HASH_LOG, MLS>(v0, hash_log);

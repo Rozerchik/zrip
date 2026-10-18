@@ -12,12 +12,10 @@ MIRI_TEST_THREADS="${MIRI_TEST_THREADS:-1}"
 if [ "$SMOKE" = "1" ]; then
   FUZZ_SECONDS_PER_TARGET="${FUZZ_SECONDS_PER_TARGET:-5}"
   FUZZ_TARGET_LIMIT="${FUZZ_TARGET_LIMIT:-1}"
-  RUN_MIRI_UNSAFE="${RUN_MIRI_UNSAFE:-0}"
   RUN_FULL_MIRI="${RUN_FULL_MIRI:-0}"
 else
   FUZZ_SECONDS_PER_TARGET="${FUZZ_SECONDS_PER_TARGET:-1800}"
   FUZZ_TARGET_LIMIT="${FUZZ_TARGET_LIMIT:-0}"
-  RUN_MIRI_UNSAFE="${RUN_MIRI_UNSAFE:-1}"
   RUN_FULL_MIRI="${RUN_FULL_MIRI:-1}"
 fi
 FUZZ_MAX_LEN="${FUZZ_MAX_LEN:-65536}"
@@ -114,10 +112,6 @@ run_logged() {
     >>"$summary"
   status "DONE $phase status=$outcome exit=$rc seconds=$elapsed"
   return "$rc"
-}
-
-miri_unsafe_primitives() {
-  MIRI_JOBS="$CPU_COUNT" scripts/miri_unsafe_primitives.sh
 }
 
 miri_full_alloc() {
@@ -268,7 +262,6 @@ main() {
   status "overnight memory audit start run_id=$RUN_ID"
   status "log_dir=$LOG_DIR"
   status "config cpu_count=$CPU_COUNT smoke=$SMOKE sanitizer=$FUZZ_SANITIZER"
-  status "config run_miri_unsafe=$RUN_MIRI_UNSAFE"
   status "config run_full_miri=$RUN_FULL_MIRI"
   status "config fuzz_jobs_while_miri=$FUZZ_JOBS_WHILE_MIRI"
   status "config fuzz_seconds_per_target=$FUZZ_SECONDS_PER_TARGET"
@@ -292,11 +285,6 @@ main() {
 
   run_logged "$SUMMARY_LOG" fuzz_build fuzz_build "${targets[@]}" \
     || failures=$((failures + 1))
-
-  if [ "$RUN_MIRI_UNSAFE" = "1" ]; then
-    run_logged "$SUMMARY_LOG" miri_unsafe_primitives miri_unsafe_primitives \
-      || failures=$((failures + 1))
-  fi
 
   if [ "$RUN_FULL_MIRI" = "1" ]; then
     status "START miri_background_suite"

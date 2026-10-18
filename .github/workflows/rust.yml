@@ -37,15 +37,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo +nightly test -p zrip-core -p zrip-encode -p zrip-decode -p zrip --lib --tests
 
-  paranoid:
-    name: paranoid (pure safe Rust)
+  clippy-stable:
+    name: clippy (stable)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p zrip-core -p zrip-encode -p zrip-decode -p zrip --lib --tests --features paranoid
-      - run: cargo clippy -p zrip-core -p zrip-encode -p zrip-decode -p zrip --lib --tests --features paranoid
+      - run: cargo clippy -p zrip-core -p zrip-encode -p zrip-decode -p zrip --lib --tests --features dict_builder
 
   lint:
     name: fmt + clippy
@@ -61,7 +62,7 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [test, nightly, paranoid, lint]
+    needs: [test, nightly, clippy-stable, lint]
     runs-on: ubuntu-latest
     if: always()
     steps:

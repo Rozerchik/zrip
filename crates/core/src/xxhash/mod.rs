@@ -31,9 +31,7 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
         let mut v3 = seed;
         let mut v4 = seed.wrapping_sub(PRIME64_1);
 
-        paranoid_unsafe_call!(primitives::bulk_rounds(
-            data, &mut v1, &mut v2, &mut v3, &mut v4
-        ));
+        primitives::bulk_rounds(data, &mut v1, &mut v2, &mut v3, &mut v4);
 
         h64 = v1
             .rotate_left(1)
@@ -137,13 +135,7 @@ impl Xxh64State {
 
         if data.len() >= 32 {
             self.large = true;
-            paranoid_unsafe_call!(primitives::bulk_rounds(
-                data,
-                &mut self.v1,
-                &mut self.v2,
-                &mut self.v3,
-                &mut self.v4
-            ));
+            primitives::bulk_rounds(data, &mut self.v1, &mut self.v2, &mut self.v3, &mut self.v4);
             let consumed = data.len() & !31;
             data = &data[consumed..];
         }

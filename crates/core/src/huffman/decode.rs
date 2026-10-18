@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 #[cfg(feature = "alloc")]
 use alloc::vec;
 #[cfg(feature = "alloc")]
@@ -79,21 +77,6 @@ pub fn decode_single_stream_vec(
 ) -> Result<(), DecompressError> {
     validate_decode_table(table, table_log)?;
     prepare_output(output, output_size);
-    #[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
-    {
-        if crate::simd::has_bmi2() {
-            // SAFETY: has_bmi2() proves BMI2 is available.
-            let result = unsafe {
-                super::decode_4stream::decode_single_stream_bmi2_safe(
-                    table, table_log, data, output,
-                )
-            };
-            if result.is_err() {
-                output.clear();
-            }
-            return result;
-        }
-    }
     let result = decode_single_stream_into(table, table_log, data, output);
     if result.is_err() {
         output.clear();
@@ -238,26 +221,6 @@ fn decode_4_streams_with(
 ) -> Result<(), DecompressError> {
     validate_decode_table(table, table_log)?;
     prepare_output(output, output_size);
-    #[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
-    {
-        if crate::simd::has_bmi2() {
-            // SAFETY: has_bmi2() proves BMI2 is available.
-            let result = unsafe {
-                super::decode_4stream::decode_4_streams_core_bmi2_safe(
-                    table,
-                    table_log,
-                    pairs,
-                    data,
-                    output_size,
-                    output,
-                )
-            };
-            if result.is_err() {
-                output.clear();
-            }
-            return result;
-        }
-    }
     let result = decode_4_streams_core_safe(table, table_log, pairs, data, output_size, output);
     if result.is_err() {
         output.clear();
@@ -361,7 +324,7 @@ mod tests {
         // Regression: a one-entry table satisfies `table.len() >= 1 <<
         // table_log` when `table_log == 0`, but zero is not a valid Huffman
         // table log. Reject it before `decode_stream_tail` can compute an
-        // unchecked table index from the fast path.
+        // out-of-range table index from the fast path.
         let table = [HuffmanDecodeEntry {
             symbol: 0,
             num_bits: 1,
@@ -379,7 +342,7 @@ mod tests {
     fn huffman_4stream_rejects_zero_table_log_before_tail_lookup() {
         // Regression: the 4-stream decoder reaches the same tail helper after
         // splitting the output. Reject a zero table log at the public boundary
-        // so it cannot reach `huf_table_lookup`'s unchecked read.
+        // so it cannot reach `huf_table_lookup`'s table read.
         let table = [HuffmanDecodeEntry {
             symbol: 0,
             num_bits: 1,

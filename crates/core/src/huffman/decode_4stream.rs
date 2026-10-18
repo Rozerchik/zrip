@@ -4,54 +4,6 @@ use crate::error::DecompressError;
 use crate::huffman::primitives as huffman_primitives;
 use crate::huffman::{DECODE_TABLE_SIZE, HuffmanDecodeEntry, PAIR_TABLE_LOG, PAIR_TABLE_SIZE};
 
-#[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
-#[target_feature(enable = "bmi2")]
-fn decode_single_stream_bmi2(
-    table: &[HuffmanDecodeEntry],
-    table_log: u8,
-    data: &[u8],
-    output: &mut [u8],
-) -> Result<(), DecompressError> {
-    super::decode::decode_single_stream_into(table, table_log, data, output)
-}
-
-#[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
-pub(super) unsafe fn decode_single_stream_bmi2_safe(
-    table: &[HuffmanDecodeEntry],
-    table_log: u8,
-    data: &[u8],
-    output: &mut [u8],
-) -> Result<(), DecompressError> {
-    // SAFETY: The caller verifies BMI2 availability via has_bmi2().
-    unsafe { decode_single_stream_bmi2(table, table_log, data, output) }
-}
-
-#[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
-#[target_feature(enable = "bmi2")]
-fn decode_4_streams_core_bmi2(
-    table: &[HuffmanDecodeEntry],
-    table_log: u8,
-    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
-    data: &[u8],
-    output_size: usize,
-    output: &mut [u8],
-) -> Result<(), DecompressError> {
-    decode_4_streams_core(table, table_log, pairs, data, output_size, output)
-}
-
-#[cfg(all(target_arch = "x86_64", not(feature = "paranoid")))]
-pub(super) unsafe fn decode_4_streams_core_bmi2_safe(
-    table: &[HuffmanDecodeEntry],
-    table_log: u8,
-    pairs: Option<&[u32; PAIR_TABLE_SIZE]>,
-    data: &[u8],
-    output_size: usize,
-    output: &mut [u8],
-) -> Result<(), DecompressError> {
-    // SAFETY: The caller verifies BMI2 availability via has_bmi2().
-    unsafe { decode_4_streams_core_bmi2(table, table_log, pairs, data, output_size, output) }
-}
-
 pub(super) fn decode_4_streams_core(
     table: &[HuffmanDecodeEntry],
     table_log: u8,
