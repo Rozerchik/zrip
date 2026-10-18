@@ -482,7 +482,7 @@ fn compress_context_compress_into_matches_compress() {
     #[cfg(not(miri))]
     inputs.push(&large);
 
-    for level in [-8, -1, 1, 3, 4] {
+    for level in [-7, -1, 1, 3, 4] {
         let mut ctx = zrip::CompressContext::new(level).unwrap();
         let mut ctx_into = zrip::CompressContext::new(level).unwrap();
         for input in &inputs {

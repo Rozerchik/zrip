@@ -668,7 +668,7 @@ mod tests {
     fn negative_levels_skip_huffman_on_tiny_inputs() {
         // No usable matches: only Huffman could shrink these bytes.
         let data = skewed_bytes(2048);
-        for level in -8..=-1 {
+        for level in -7..=-1 {
             let out = compress(&data, level).unwrap();
             assert!(out.len() > data.len(), "L{level}: {} compressed", out.len());
         }
@@ -681,30 +681,45 @@ mod tests {
     #[test]
     fn negative_levels_still_match_tiny_inputs() {
         let data = wordy_bytes(2048);
-        let sizes: Vec<usize> = (-8..=-1)
+        let sizes: Vec<usize> = (-7..=-1)
             .map(|level| compress(&data, level).unwrap().len())
             .collect();
-        // At least 10% smaller, and no smaller output at a faster level.
-        assert!(sizes.iter().all(|&n| n * 11 < data.len() * 10), "{sizes:?}");
+        // L-6 to L-1 at least 10% smaller; L-7 takes only matches of eight
+        // bytes or more, which these short words seldom repeat. No smaller
+        // output at a faster level.
+        assert!(
+            sizes[1..].iter().all(|&n| n * 11 < data.len() * 10),
+            "{sizes:?}"
+        );
         assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
     }
 
     #[test]
     fn negative_levels_huffman_code_above_their_raw_limit() {
         let data = skewed_bytes(32 * 1024);
-        for level in -8..=-1 {
+        for level in -6..=-1 {
             let out = compress(&data, level).unwrap();
             assert!(out.len() * 5 < data.len() * 4, "L{level}: {}", out.len());
         }
+        // L-7 keeps literals raw at every size.
+        let out = compress(&data, -7).unwrap();
+        assert!(out.len() > data.len(), "L-7: {}", out.len());
+    }
+
+    #[test]
+    fn level_minus_8_runs_as_level_minus_7() {
+        let data = wordy_bytes(64 * 1024);
+        assert_eq!(compress(&data, -8).unwrap(), compress(&data, -7).unwrap());
     }
 
     #[test]
     fn faster_levels_keep_raw_literals_longer() {
-        let limits: Vec<usize> = (-8..=-1)
+        let limits: Vec<usize> = (-6..=-1)
             .map(|level| strategy::raw_literals_limit(level).unwrap())
             .collect();
         assert_eq!(limits.last(), Some(&2048));
         assert!(limits.windows(2).all(|w| w[0] > w[1]), "{limits:?}");
+        assert_eq!(strategy::raw_literals_limit(-7), None);
         assert_eq!(strategy::raw_literals_limit(1), None);
     }
 

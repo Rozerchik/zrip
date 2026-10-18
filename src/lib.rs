@@ -1,6 +1,6 @@
 //! Fast, pure-Rust zstd compression.
 //!
-//! zrip implements zstd compression levels -8 through 4 (Fast and `DFast` strategies),
+//! zrip implements zstd compression levels -7 through 4 (Fast and `DFast` strategies),
 //! targeting high-speed compression for data transfers. It produces standard zstd
 //! frames decompressible by any compliant decoder.
 //!
@@ -21,11 +21,13 @@
 //!
 //! | Level | Strategy | Notes |
 //! |-------|----------|-------|
-//! | -8 | Fast | zrip-only, faster than L-7 at a slightly lower ratio |
-//! | -7..=-1 | Fast | Fastest encode, lowest ratio |
+//! | -7 | Fast | Fastest; raw literals and long matches only, for LZ4's niche |
+//! | -6..=-1 | Fast | Fast encode, lower ratio |
 //! | 0 | | Library default (currently level 1) |
 //! | 1..=2 | Fast | Good balance for network transfers |
 //! | 3..=4 | `DFast` | Better ratio, still fast |
+//!
+//! Level -8, a separate zrip level in earlier versions, runs as -7.
 //!
 //! # Streaming
 //!

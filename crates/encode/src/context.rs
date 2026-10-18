@@ -128,7 +128,7 @@ pub struct CompressContext {
 }
 
 impl CompressContext {
-    /// Creates a new context for the given compression level (-8..=4).
+    /// Creates a new context for the given compression level (-7..=4; -8 runs as -7).
     pub fn new(level: i32) -> Result<Self, CompressError> {
         let params = strategy::level_params(level).ok_or(CompressError::InvalidLevel(level))?;
         let max_log = strategy::max_hash_log(level).expect("level validated above");

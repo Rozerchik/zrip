@@ -21,13 +21,6 @@ pub(crate) fn rd64_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
     rd64(src, pos.min(limit))
 }
 
-/// `rd32(src, pos)` for a `pos` at most `limit`, like `rd64_upto`.
-#[inline(always)]
-pub(crate) fn rd32_upto(src: &[u8], pos: usize, limit: usize) -> u32 {
-    debug_assert!(pos <= limit);
-    rd32(src, pos.min(limit))
-}
-
 /// The first four bytes in memory of eight bytes read with `rd64`, as `rd32`
 /// would read them.
 #[inline(always)]
@@ -36,23 +29,10 @@ pub(crate) fn first4(v: u64) -> u32 {
     u32::from_ne_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// Eight bytes at `pos`, read once for `rd32_again` and `rd64_again`.
+/// Eight bytes at `pos`, read once for `rd64_again`.
 #[inline(always)]
 pub(crate) fn rd64_ahead(src: &[u8], pos: usize) -> u64 {
     rd64(src, pos)
-}
-
-/// `rd64_ahead` for a `pos` at most `limit`, as in `rd64_upto`.
-#[inline(always)]
-pub(crate) fn rd64_ahead_upto(src: &[u8], pos: usize, limit: usize) -> u64 {
-    rd64_upto(src, pos, limit)
-}
-
-/// `rd32(src, pos)` where `v` holds `rd64(src, pos)`, taken from `v` to skip
-/// a bounds check.
-#[inline(always)]
-pub(crate) fn rd32_again(_src: &[u8], _pos: usize, v: u64) -> u32 {
-    first4(v)
 }
 
 /// `rd64(src, pos)` where `v` already holds it, returned to skip a bounds

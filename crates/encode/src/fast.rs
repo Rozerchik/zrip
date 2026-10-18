@@ -22,12 +22,6 @@ macro_rules! rd64 {
     };
 }
 
-macro_rules! rd32_again {
-    ($src:expr, $pos:expr, $v:expr) => {
-        primitives::rd32_again($src, $pos, $v)
-    };
-}
-
 macro_rules! rd64_again {
     ($src:expr, $pos:expr, $v:expr) => {
         primitives::rd64_again($src, $pos, $v)
@@ -112,6 +106,33 @@ pub(crate) fn compress_fast_block(
             sequences,
         ),
         (4, 17) => compress_fast_block_h17_mls4(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (8.., 13) => compress_fast_block_h13_mls8(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (8.., _) => compress_fast_block_mls8(
+            src,
+            block_start,
+            block_end,
+            params,
+            rep_offsets,
+            hash_table,
+            sequences,
+        ),
+        (7.., 13) => compress_fast_block_h13_mls7(
             src,
             block_start,
             block_end,
@@ -398,6 +419,50 @@ fn compress_fast_block_h13_mls5(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
+fn compress_fast_block_h13_mls8(
+    src: &[u8],
+    block_start: usize,
+    block_end: usize,
+    params: &LevelParams,
+    rep_offsets: &[u32; 3],
+    hash_table: &mut [u32],
+    sequences: &mut Vec<Sequence>,
+) {
+    simd_body!(compress_fast_block_impl::<13, 8>(
+        src,
+        block_start,
+        block_end,
+        params,
+        rep_offsets,
+        hash_table,
+        sequences,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn compress_fast_block_mls8(
+    src: &[u8],
+    block_start: usize,
+    block_end: usize,
+    params: &LevelParams,
+    rep_offsets: &[u32; 3],
+    hash_table: &mut [u32],
+    sequences: &mut Vec<Sequence>,
+) {
+    simd_body!(compress_fast_block_impl::<0, 8>(
+        src,
+        block_start,
+        block_end,
+        params,
+        rep_offsets,
+        hash_table,
+        sequences,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn compress_fast_block_mls7(
     src: &[u8],
     block_start: usize,
@@ -408,6 +473,28 @@ fn compress_fast_block_mls7(
     sequences: &mut Vec<Sequence>,
 ) {
     simd_body!(compress_fast_block_impl::<0, 7>(
+        src,
+        block_start,
+        block_end,
+        params,
+        rep_offsets,
+        hash_table,
+        sequences,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn compress_fast_block_h13_mls7(
+    src: &[u8],
+    block_start: usize,
+    block_end: usize,
+    params: &LevelParams,
+    rep_offsets: &[u32; 3],
+    hash_table: &mut [u32],
+    sequences: &mut Vec<Sequence>,
+) {
+    simd_body!(compress_fast_block_impl::<13, 7>(
         src,
         block_start,
         block_end,
@@ -478,9 +565,16 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
     sequences: &mut Vec<Sequence>,
 ) {
     // C zstd hashes MLS bytes, but the fast parser confirms 4 bytes and
-    // extends from there. MLS controls hash width, not the accepted match
-    // length for this strategy.
-    let confirm: usize = if MLS >= 5 { 4 } else { MLS };
+    // extends from there, so MLS 5 to 7 set the hash width, not the shortest
+    // match. MLS 8, zrip's own, hashes and confirms eight bytes: fewer,
+    // longer matches make frames that decode faster.
+    let confirm: usize = if MLS >= 8 {
+        8
+    } else if MLS >= 5 {
+        4
+    } else {
+        MLS
+    };
 
     let block_size = block_end - block_start;
     if block_size < 8 {
@@ -530,8 +624,8 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             break;
         }
 
-        // Bytes at ip0 and ip1 for the hashes, reused for the match checks
-        // through `rd32_again`, skipping bounds checks.
+        // Bytes at ip0 and ip1 for the hashes, reused for the match checks,
+        // skipping bounds checks.
         let mut v0 = rd64!(src, ip0);
         let mut v1 = rd64!(src, ip1);
         let mut h0 = hash_val::<HASH_LOG, MLS>(v0, hash_log);
@@ -544,7 +638,7 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             let v2 = primitives::rd64_ahead(src, ip2);
 
             // Rep check at step-ahead position ip2
-            if ip2 >= rep1 && rd32_again!(src, ip2, v2) == rd32!(src, ip2 - rep1) {
+            if ip2 >= rep1 && confirms::<MLS>(src, ip2 - rep1, v2) {
                 let fill_pos = ip0;
                 ip0 = ip2;
                 // 1-byte backward extension (C zstd style)
@@ -553,7 +647,9 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
                 }
                 hash_store!(hash_table, h1, ip1 as u32);
                 let back = ip2 - ip0;
-                let mlen = count_match!(src, ip2 + 4, ip2 - rep1 + 4, block_end) + 4 + back;
+                let mlen = count_match!(src, ip2 + confirm, ip2 - rep1 + confirm, block_end)
+                    + confirm
+                    + back;
                 let lit_len = (ip0 - anchor) as u32;
                 sequences.push(Sequence {
                     literal_length: lit_len,
@@ -582,9 +678,7 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             }
 
             // First match check at ip0
-            if in_window(ip0, match_idx, max_distance)
-                && rd32_again!(src, ip0, v0) == rd32!(src, match_idx)
-            {
+            if in_window(ip0, match_idx, max_distance) && confirms::<MLS>(src, match_idx, v0) {
                 hash_store!(hash_table, h1, ip1 as u32);
                 let fill_pos = ip0;
                 let back = count_back(src, ip0, match_idx, (ip0 - anchor).min(match_idx));
@@ -637,9 +731,7 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
             hash_store!(hash_table, h0, ip0 as u32);
 
             // Second match check at shifted ip0
-            if in_window(ip0, match_idx, max_distance)
-                && rd32_again!(src, ip0, v0) == rd32!(src, match_idx)
-            {
+            if in_window(ip0, match_idx, max_distance) && confirms::<MLS>(src, match_idx, v0) {
                 if step_size + ((ip0 - anchor) >> search_strength) <= 4 {
                     hash_store!(hash_table, h1, ip1 as u32);
                 }
@@ -697,6 +789,17 @@ fn compress_fast_block_impl<const HASH_LOG: u32, const MLS: usize>(
         }
 
         break;
+    }
+}
+
+/// Whether the bytes at `pos` start like `v`, the eight bytes read at the
+/// cursor: all eight for MLS 8, else the first four.
+#[inline(always)]
+fn confirms<const MLS: usize>(src: &[u8], pos: usize, v: u64) -> bool {
+    if MLS >= 8 {
+        rd64!(src, pos) == v
+    } else {
+        rd32!(src, pos) == first4(v)
     }
 }
 
@@ -1267,10 +1370,18 @@ fn hash7_const<const HASH_LOG: u32>(value: u64, hash_log: u32) -> usize {
     (((value << 8).wrapping_mul(PRIME7)) >> (64 - hl)) as usize
 }
 
+#[inline(always)]
+fn hash8_const<const HASH_LOG: u32>(value: u64, hash_log: u32) -> usize {
+    let hl = if HASH_LOG != 0 { HASH_LOG } else { hash_log };
+    (value.wrapping_mul(PRIME64_1) >> (64 - hl)) as usize
+}
+
 /// Hash of the eight bytes `v` read at a position.
 #[inline(always)]
 fn hash_val<const HASH_LOG: u32, const MLS: usize>(v: u64, hash_log: u32) -> usize {
-    if MLS >= 7 {
+    if MLS >= 8 {
+        hash8_const::<HASH_LOG>(v, hash_log)
+    } else if MLS >= 7 {
         hash7_const::<HASH_LOG>(v, hash_log)
     } else if MLS == 6 {
         hash6_const::<HASH_LOG>(v, hash_log)
