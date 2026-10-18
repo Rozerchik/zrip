@@ -257,9 +257,8 @@ pub(crate) fn count_match(src: &[u8], p1: usize, p2: usize, limit: usize) -> usi
     let a = &src[p1..limit];
     let b = &src[p2..][..a.len()];
     let mut i = 0;
-    for (ca, cb) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
-        let diff =
-            u64::from_le_bytes(ca.try_into().unwrap()) ^ u64::from_le_bytes(cb.try_into().unwrap());
+    for (ca, cb) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        let diff = u64::from_le_bytes(*ca) ^ u64::from_le_bytes(*cb);
         if diff != 0 {
             return i + (diff.trailing_zeros() >> 3) as usize;
         }
