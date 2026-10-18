@@ -8,3 +8,8 @@ rustflags = [
     "-C", "llvm-args=--align-loops=32",
     "-C", "llvm-args=-x86-branches-within-32B-boundaries",
 ]
+
+# Give C zstd (zstd-sys, built by cc) the same loop alignment and jump
+# placement, so benchmarks compare it on equal terms.
+[env]
+CFLAGS_x86_64_unknown_linux_gnu = "-falign-loops=32 -Wa,-mbranches-within-32B-boundaries"
