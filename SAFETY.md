@@ -1,58 +1,29 @@
 # Safety
 
-## Unsafe boundary
+## No unsafe
 
-**Decoder:** `exec.rs` and `sequences.rs` are `#![forbid(unsafe_code)]`.
-Unsafe decode support lives in `decode/src/fast_vec.rs` and
-`decode/src/seq_table.rs`: unaligned copies, `Vec::set_len`,
-`build_pattern_u64`, and `MaybeUninit` table reads. These paths are gated by
-`#[cfg(not(feature = "paranoid"))]` with `debug_assert!` guards. SIMD dispatch
-uses `fearless_simd::dispatch!` in `lib.rs` (no manual `unsafe` dispatch calls).
-No `unsafe` is exposed in the public API.
+All four crates (`zrip`, `zrip-core`, `zrip-encode`, `zrip-decode`) are
+`#![forbid(unsafe_code)]`. SIMD dispatch goes through `fearless_simd`
+(`dispatch!` in the decoder, `simd_body!` in the encoder), which keeps the
+`#[target_feature]` calls inside that crate. No `unsafe` is exposed in the
+public API.
 
-**Encoder:** unsafe is confined to `encode/src/primitives.rs`:
-`get_unchecked`, `read_unaligned`, `count_match_raw`, `prefetch`.
-Callers prove bounds at block level. Every block has a `debug_assert!` guard.
-Runtime AVX2/BMI2 dispatch goes through `fearless_simd` (no manual unsafe).
-The sequence and Huffman bit writers are safe: they write into
-pre-initialized buffers.
+The hot loops keep most bounds checks out by construction. Hash tables are
+cut to their exact size, bytes read for hashing are reused for match checks,
+and DFast clamps reads to a limit the compiler can prove in bounds. A clamped
+read never leaves the input, but if a finder invariant broke, it would read
+the wrong bytes instead of panicking; debug builds assert the invariants. The
+decoder zeroes each block's output room, so its chunked copies index an
+initialized slice.
 
-**Core:** unsafe is confined to `primitives.rs` in `bitstream/` and `xxhash/`
-(`#[inline(always)]` wrappers around `read_unaligned`) and to the BMI2
-`#[target_feature]` wrappers in `huffman/decode_4stream.rs`. Same pattern as
-encoder.
-
-## `paranoid` feature
-
-`cargo build --features paranoid` compiles zrip with `#![forbid(unsafe_code)]`
-on all four crates. The decoder is already safe by default; `paranoid` affects
-the encoder and core primitives:
-
-| Category | Default | Paranoid |
-|:---------|:--------|:---------|
-| Encoder indexing | `get_unchecked`, `read_unaligned` | Direct indexing, `from_ne_bytes` |
-| Decoder SIMD dispatch | `fearless_simd::dispatch!` | Same (no unsafe needed) |
-| Decoder wild-copy | 16- and 32-byte unaligned copies into spare capacity | Chunked copies within a zeroed slice |
-| Huffman BMI2 dispatch | `#[target_feature]` wrapper | Gated out; generic call |
-
-The safe alternatives use the same algorithms and produce identical output.
-Encode throughput drops 1-8% (Silesia, levels -8 to 4). The match finders keep
-most bounds checks off their hot loops: hash tables are cut to their exact
-size, bytes read for hashing are reused for match checks, and DFast clamps
-reads to a limit the compiler can prove in bounds. A clamped read never leaves
-the input, but if a finder invariant broke, it would read the wrong bytes
-instead of panicking; debug builds assert the invariants. Decode throughput
-drops 11-14% (Silesia), from bounds checks on the copies and zeroing each
-block's output room in `fast_vec.rs`.
-
-The feature exists for users who need a guarantee of zero unsafe, or for
-auditing and benchmarking the cost of safe-only codepaths.
+The `paranoid` feature has no effect today. It stays so existing feature
+lists keep building, and as a guarantee: if a later release adds `unsafe`
+code for speed, builds with `paranoid` leave it out.
 
 ## Testing
 
-- **Miri** (Stacked Borrows): full suite with 256 seed variations, plus targeted
-  decode-path tests covering every unsafe primitive in `fast_vec.rs` and
-  dict-compressed decode (56 fuzz-corpus-derived frames).
+- **Miri** (Stacked Borrows): full suite with 256 seed variations, plus decode
+  smoke tests and dict-compressed decode (56 fuzz-corpus-derived frames).
 - **Fuzz** (16 targets, ASAN): round-trip and corruption targets, 3+ hours each.
 - **Adversarial corpus**: 6500+ small/malformed zstd files from prior fuzzing.
 - **Proptest**: property-based round-trips with random data sizes and levels.

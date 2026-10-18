@@ -4,43 +4,17 @@
 
 ### Changed
 
-- Faster decoding on the Silesia corpus: 9-18% across levels (12% at level
-  1), 13% on frames written by C zstd at level 1, and 13-22% in the
-  `paranoid` build.
-  - The sequence loop keeps the output position in a register instead of
-    updating the vector's length after every copy.
-  - It refills its bits once per sequence and reads them with one shift and
-    one `bzhi`.
-  - The fast path makes three checks per sequence; the rest move to a cold
-    path.
-  - Literals are followed by 32 bytes of slack and copied in 16- and 32-byte
-    chunks. Raw literals are read in place.
-  - Matches with offsets below 8 are copied eight bytes at a time.
-- Literal sections of at most five bits per symbol decode with a
-  two-symbol Huffman table.
-- Faster encoding with better ratios at levels -8 to 2: 6-12% faster on the
-  Silesia corpus, with output 0.9-2.3% smaller. Levels 3 and 4 compress 1.7%
-  smaller.
-  - Backward match extension may reach into earlier blocks, as in C zstd.
-  - The Fast match finder no longer prefetches its hash table.
-  - Sequence packing counts code frequencies in the same pass, and the
-    sequence encoder flushes its bits once per sequence.
-  - The content checksum hashes each block right after compressing it,
-    while its bytes are still in cache.
-- The encoder checks a block for incompressible bytes at eight places
-  instead of its first 1 KiB, using C zstd's bound. Literals above 7.97
-  bits per byte stay raw without building a Huffman table.
-- The `paranoid` build encodes 6-11% faster on the Silesia corpus (2% at
-  level 3), within 1-8% of the default build. Its match finders cut hash
-  tables to their exact size so indexing needs no checks, reuse the bytes
-  read for hashing in match checks, and in DFast clamp reads to a limit the
-  compiler can prove in bounds.
+- All crates are `#![forbid(unsafe_code)]`, at about the speed of the
+  removed unsafe code. The `paranoid` feature has no effect today.
+- Faster decoding and encoding.
+- Retuned levels. L-7 targets LZ4's niche with raw literals and long
+  matches only; level -8 runs as L-7. L-6 to L-4 encode faster. L3 and L4
+  use a match finder modeled on C zstd's: faster, with better ratios.
 
 ### Fixed
 
-- A sequences bitstream that runs out of bits before its last sequence
-  fails with `CorruptSequences`, as it does in C zstd. The decoder read past
-  the stream's start and could return wrong bytes.
+- A sequences bitstream that runs out of bits early fails with
+  `CorruptSequences`, as in C zstd, instead of returning wrong bytes.
 
 ## [0.8.11] - 2026-09-27
 
