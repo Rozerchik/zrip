@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-10-19
+
 ### Changed
 
 - All crates now enforce `#![forbid(unsafe_code)]`. The `paranoid` feature
@@ -10,6 +12,7 @@
 - Retuned levels. L-7 targets LZ4's niche with raw literals and long
   matches only; level -8 runs as L-7. L-6 to L-4 encode faster. L3 and L4
   use a match finder modeled on C zstd's: faster, with better ratios.
+- Bump the JSR and npm packages to `0.5.12`.
 
 ### Fixed
 

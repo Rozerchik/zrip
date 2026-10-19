@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-19
+
 - Enforce `#![forbid(unsafe_code)]` for every build. The `paranoid` feature
   remains available and has no effect today.
 - Faster match finding and block encoding, with reused sequence buffers
