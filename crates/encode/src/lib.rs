@@ -33,6 +33,7 @@ macro_rules! simd_body {
     };
 }
 
+pub mod adaptive;
 pub(crate) mod block_encoder;
 #[cfg(feature = "std")]
 pub mod context;
@@ -493,7 +494,13 @@ pub fn compress_with_dict(
             match params.strategy {
                 Strategy::Fast => {
                     let mut hash_table = vec![0u32; hash_size];
-                    fast::prefill_hash_table(&combined, plen, params.hash_log, &mut hash_table);
+                    fast::prefill_hash_table(
+                        &combined,
+                        plen,
+                        params.hash_log,
+                        params.min_match,
+                        &mut hash_table,
+                    );
                     let mut offset = 0;
                     while offset < input.len() {
                         let chunk_size = (input.len() - offset).min(MAX_BLOCK_SIZE);

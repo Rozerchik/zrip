@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- `zrip::adaptive::AdaptiveLevel` walks the compression level toward ratio
+  or speed. The caller reports each window's `CompressStats` and what
+  limited it: `Bottleneck::Output`, `Cpu`, or `Input`.
+- `CompressContext::set_level()` and `CompressContext::level()`. A context
+  with a dictionary prepares it again for the new level.
+
+### Fixed
+
+- Dictionaries at levels -7 to 2 no longer cost ratio. Inputs up to 16 KiB
+  used a weaker match finder than inputs without a dictionary, and larger
+  inputs never matched the dictionary. Both now use the regular match
+  finder, with dictionary matches of the level's minimum length. Inputs up
+  to 8 KiB keep the dictionary in a separate table.
+
 ## [0.8.12] - 2026-10-19
 
 ### Changed

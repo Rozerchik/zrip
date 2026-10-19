@@ -206,46 +206,43 @@ selection + `finalize_dictionary()` produces standard zstd dictionary format
 `FastCoverParams` defaults: k=2048, d=8, accel=1. Full COVER also exists in
 `core/src/dict/cover.rs`.
 
-### 3-tier dict setup (`context.rs:compress_with_prepared`)
+### Dict setup (`context.rs:compress_with_prepared`)
 
 Adapts setup cost to input size:
 
-| Tier | Input size | Hash setup | Match finder | Literals |
-|------|-----------|-----------|-------------|----------|
-| A (micro) | <= per-level threshold | zero small input table | `compress_fast_attached` (linear scan, dual-lookup) | raw |
-| B (small) | threshold-16 KiB | zero moderate input table | `compress_fast_attached` (linear scan, dual-lookup) | Huffman from dict |
-| C (large) | > 16 KiB | copy full snapshot | `compress_fast_block` (4-cursor pipeline) | Huffman from dict |
+| Path | Input | Hash setup | Match finder |
+|------|-------|-----------|-------------|
+| Attached | <= 8 KiB, or one block outside the snapshot's tier | zero an input table sized to the input | `compress_fast_block_attached` |
+| Copy | > 8 KiB in the snapshot's tier | copy the prefilled snapshot | `compress_fast_block` |
+| Per call | over one block outside the snapshot's tier | prefill per call | `compress_fast_block` |
 
-Thresholds: `ATTACH_THRESHOLD` (16 KiB), per-level raw literals ramp (see
-level parameters above). DFast strategy (levels 3-4) always uses the copy
-path.
+`ATTACH_THRESHOLD` is 8 KiB, the attach limit of C zstd's fast strategy.
+Literals stay raw below the per-level raw-literals ramp, measured on dict plus
+input size, and use Huffman seeded from the dict otherwise. DFast (levels 3-4)
+always copies or prefills.
 
-### Dict attachment (`fast.rs:compress_fast_attached`)
+### Dict attachment (`fast.rs:compress_fast_block_attached`)
 
-For tiers A and B, the PreparedDict's hash snapshot is referenced as a frozen
-read-only table. A separate zeroed input hash table accumulates entries from
-the current input. Two hash lookups per position (input table first, dict
-table fallback). Zero-copy: no `memcpy` of the dict hash per frame.
-
-Why a separate loop: the 4-cursor pipeline has ~15 live values for x86_64's
-15 GPRs, with 5 stack spills per iteration. Adding dict attachment state
-(dict hash pointer, second hash value, dict match candidate) would push to
-~17+ live values and worsen spills. The simpler linear-scan loop has fewer
-live variables and tolerates the extra state. For small inputs, the pipeline
-startup cost dominates anyway.
+The 4-cursor match finder with `DICT` set. A zeroed input table collects the
+input's positions. A probe that misses it looks up a read-only dict table
+hashed with the same width. No `memcpy` of the dict table per frame.
+`PreparedDict` keeps one dict table per minimum match the level uses, since
+negative levels search small inputs with a shorter match. The tables are sized
+one bit above the dict content's log.
 
 ### Hash log clamping (`strategy.rs:level_params_for_size`)
 
 Clamps `hash_log`, `chain_log`, and `window_log` to `src_log` for small
-inputs. The input-side hash table in the attached path uses this clamped size
-while the dict-side table keeps the level's full `hash_log`. Reduces table
-init cost without losing dict coverage.
+inputs. The attached input table uses the clamped size; the dict table is
+sized to the dict content. Reduces table init cost without losing dict
+coverage.
 
 ### Hash table prefill (`fast.rs:prefill_hash_table`)
 
-Fills the hash table from the dict prefix with strided sampling (step =
-prefix_len / hash_size), then densely hashes the last 64 bytes. Balances
-coverage against initialization cost.
+Hashes dict positions with the match finder's width for the level's minimum
+match: strided sampling (step = prefix_len / hash_size), then the last 64
+positions densely. Another width would put dict entries in slots the match
+finder never reads.
 
 ### Dict entropy table carryover (`context.rs:PreparedDict::new`)
 
@@ -254,8 +251,10 @@ construction time. The first block uses dict tables as FSE "repeat" mode.
 
 ### Encoder prefix mode
 
-Concatenates dict content + source, pre-fills hash table from dict content,
-then runs the normal match finder over the combined buffer.
+The one-shot and streaming APIs concatenate dict content and source. A
+one-shot input of one block runs the attached match finder with a per-call
+dict table. Longer inputs and the streaming encoder prefill the hash table
+and run the normal match finder over the combined buffer.
 
 
 ## Streaming

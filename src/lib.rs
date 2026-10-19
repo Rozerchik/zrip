@@ -86,6 +86,7 @@ extern crate alloc;
 pub use zrip_core::error;
 pub use zrip_core::frame;
 pub use zrip_core::{CompressError, DecompressError, ZstdError};
+pub use zrip_encode::adaptive;
 
 #[cfg(feature = "alloc")]
 pub use zrip_core::dict;

@@ -1116,6 +1116,37 @@ fn streaming_encoder_reset_c_zstd_interop() {
 
 // ===== Dictionary interop =====
 
+/// Sizes cover the attached, snapshot, and multi-block dictionary paths.
+#[test]
+fn c_zstd_decodes_zrip_dict_frames_at_every_level() {
+    let (samples, dict_data) = make_dict_samples();
+    let dict = zrip::dict::Dictionary::from_bytes(&dict_data).unwrap();
+    let c_dict = zstd::dict::DecoderDictionary::copy(&dict_data);
+    let text: Vec<u8> = (0..30u32)
+        .flat_map(|round| {
+            samples.iter().flat_map(move |sample| {
+                let mut sample = sample.clone();
+                sample.extend_from_slice(round.to_string().as_bytes());
+                sample
+            })
+        })
+        .collect();
+    assert!(text.len() >= 200_000);
+
+    for level in -7..=4 {
+        let mut ctx = zrip::CompressContext::with_dict(level, dict.clone()).unwrap();
+        for len in [100, 8192, 8193, 16385, 40_000, 200_000] {
+            let input = &text[..len];
+            let frame = ctx.compress(input).unwrap().into_owned();
+            let mut c_dec =
+                zstd::Decoder::with_prepared_dictionary(frame.as_slice(), &c_dict).unwrap();
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut c_dec, &mut out).unwrap();
+            assert_eq!(out, input, "L{level} {len} B");
+        }
+    }
+}
+
 fn make_dict_samples() -> (Vec<Vec<u8>>, Vec<u8>) {
     let samples: Vec<Vec<u8>> = (0..100)
         .map(|i| {
