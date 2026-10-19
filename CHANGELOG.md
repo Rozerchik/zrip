@@ -4,8 +4,8 @@
 
 ### Changed
 
-- All crates are `#![forbid(unsafe_code)]`, at about the speed of the
-  removed unsafe code. The `paranoid` feature has no effect today.
+- All crates now enforce `#![forbid(unsafe_code)]`. The `paranoid` feature
+  remains available and has no effect today.
 - Faster decoding and encoding.
 - Retuned levels. L-7 targets LZ4's niche with raw literals and long
   matches only; level -8 runs as L-7. L-6 to L-4 encode faster. L3 and L4

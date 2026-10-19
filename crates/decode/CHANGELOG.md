@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Enforce `#![forbid(unsafe_code)]` for every build. The `paranoid` feature
+  remains available and has no effect today.
+- Faster sequence and literal decoding with safe output copies and
+  two-symbol Huffman tables for dense literal sections.
+- Reject sequence bitstreams that run out of bits early with
+  `CorruptSequences` instead of returning incorrect output.
+
 ## [0.8.10] - 2026-09-27
 
 - Use a frame's declared content size as its output limit. Up to 128 MiB,
