@@ -1,5 +1,5 @@
-// C zstd cross-validation tests. Skipped under Miri (FFI unsupported).
-#![cfg(all(feature = "std", not(miri)))]
+// C zstd cross-validation tests.
+#![cfg(feature = "std")]
 
 const BLOCK: usize = zrip::frame::MAX_BLOCK_SIZE; // 128 KiB
 const KNUTH: u32 = 0x9E37_79B1;
@@ -55,7 +55,7 @@ fn roundtrip_deep_huffman_tree_c_cross_validate() {
             cumulative.iter().position(|&c| r < c).unwrap() as u8 + b'a'
         })
         .collect();
-    for level in [-8, -7, -5, -1, 1, 3, 4] {
+    for level in [-7, -5, -1, 1, 3, 4] {
         let compressed = zrip::compress(&original, level).unwrap();
         let c_decompressed = zstd::decode_all(&compressed[..])
             .unwrap_or_else(|e| panic!("level {level} C decompress: {e}"));
@@ -75,7 +75,8 @@ fn literals_only_blocks_compress_and_c_decodes() {
             ((r >> 26) & (r >> 20) & 63) as u8 + b' '
         })
         .collect();
-    for level in [-7, -6, -5, -1, 1, 3] {
+    // L-7 keeps literals raw.
+    for level in [-6, -5, -1, 1, 3] {
         let compressed = zrip::compress(&original, level).unwrap();
         assert!(
             compressed.len() * 10 < original.len() * 9,
@@ -1262,7 +1263,7 @@ fn compress_context_ad_hoc_dict_all_levels_c_cross_validate() {
     let dict = zrip::dict::Dictionary::from_bytes(&dict_data).unwrap();
     let c_dict = zstd::dict::DecoderDictionary::copy(&dict_data);
 
-    for level in [-8, -7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4] {
+    for level in [-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4] {
         let mut ctx = zrip::CompressContext::new(level).unwrap();
 
         for sample in &samples[..10] {
@@ -1284,7 +1285,7 @@ fn compress_context_plain_after_ad_hoc_dict_c_cross_validate() {
     let (samples, dict_data) = make_dict_samples();
     let dict = zrip::dict::Dictionary::from_bytes(&dict_data).unwrap();
 
-    for level in [-8, -3, 1, 4] {
+    for level in [-7, -3, 1, 4] {
         let mut ctx = zrip::CompressContext::new(level).unwrap();
 
         for (dict_sample, plain_sample) in samples[..10].iter().zip(samples[20..30].iter()) {

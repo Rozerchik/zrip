@@ -1,7 +1,7 @@
 # @paddor/zrip
 
 Pure Rust zstd codec compiled to WebAssembly. Decodes standard zstd blocks and
-frames produced at any compression level. Encodes levels -8 through 4 for fast
+frames produced at any compression level. Encodes levels -7 through 4 for fast
 transfer pipelines. First-class dictionary support.
 
 Automatically detects WASM SIMD support and loads the appropriate binary.
@@ -23,8 +23,7 @@ const bounded = decompress(compressed, { maxDecompressedSize: data.length });
 
 |  Level | Strategy | Notes                                |
 | -----: | :------- | :----------------------------------- |
-|     -8 | Fast     | zrip-specific, fastest, lowest ratio |
-|     -7 | Fast     |                                      |
+|     -7 | Fast     | Fastest, raw literals; -8 runs as -7 |
 | -6..-1 | Fast     |                                      |
 |      0 |          | Alias for level 1                    |
 |      1 | Fast     | Default                              |

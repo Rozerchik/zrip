@@ -13,4 +13,3 @@ structured-zstd = { version = "0.0.48", optional = true }
 [features]
 default = []
 czstd = ["zstd"]
-paranoid = ["zrip/paranoid"]

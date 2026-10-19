@@ -3,7 +3,7 @@
 /// Match-finding strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
-    /// Single hash table (levels -8 through 2).
+    /// Single hash table (levels -7 through 2).
     Fast,
     /// Short + long hash tables (levels 3-4).
     DFast,
@@ -101,9 +101,6 @@ pub fn level_params_for_size(level: i32, src_len: usize) -> Option<LevelParams> 
             params.search_strength = search_strength;
         }
     }
-    if level == 3 && (32 * 1024..=128 * 1024).contains(&src_len) {
-        params.search_strength = 7;
-    }
     Some(params)
 }
 
@@ -117,10 +114,11 @@ pub const WINDOW_LOG_MAX: u32 = 27;
 /// Building a Huffman table costs a few microseconds regardless of input
 /// size. For tiny messages that dominates the encode time, so the negative
 /// levels skip it: 2 KiB at L-1, growing 1.5x or 1.33x per level (the size
-/// doubles every two levels) to 24 KiB at L-8. `None` for levels that always
-/// try Huffman literals.
+/// doubles every two levels) to 12 KiB at L-6. `None` for L-7, which keeps
+/// literals raw at every size, and for levels that always try Huffman
+/// literals.
 pub(crate) fn raw_literals_limit(level: i32) -> Option<usize> {
-    if !(-8..=-1).contains(&level) {
+    if !(-6..=-1).contains(&level) {
         return None;
     }
     let rank = (-level - 1) as usize;
@@ -133,12 +131,11 @@ pub(crate) fn raw_literals_limit(level: i32) -> Option<usize> {
 ///
 /// Without Huffman literals, matches are the only compression, so the
 /// negative levels search more densely on these inputs than on large ones.
-/// L-8 is a slightly sparser L-7. L-4 shares its step with L-3 and L-2 but
-/// grows it faster through regions without matches.
+/// L-7 keeps its own search, which always runs on raw literals. L-4 shares
+/// its step with L-3 and L-2 but grows it faster through regions without
+/// matches.
 fn small_input_search(level: i32) -> Option<(u32, u32, u32)> {
     Some(match level {
-        -8 => (8, 5, 5),
-        -7 => (5, 5, 6),
         -6 => (4, 5, 6),
         -5 => (3, 5, 6),
         -4 => (2, 5, 6),
@@ -167,9 +164,9 @@ pub(crate) struct BlockPolicy {
 /// Encoding choices for a block of an input of `input_len` bytes.
 ///
 /// The fast negative levels skip Huffman coding for dense literals: on
-/// low-compressibility data it costs more time than it saves space. L-8 to
+/// low-compressibility data it costs more time than it saves space. L-6 to
 /// L-1 keep literals above 6.25 bits per byte raw. Small inputs keep all
-/// literals raw (see `raw_literals_limit`).
+/// literals raw (see `raw_literals_limit`), and L-7 keeps them raw always.
 pub(crate) fn block_policy(params: &LevelParams, input_len: usize) -> BlockPolicy {
     let max_literal_entropy_fp8 = if params.strategy == Strategy::Fast && params.min_match >= 5 {
         match params.target_length {
@@ -187,19 +184,7 @@ pub(crate) fn block_policy(params: &LevelParams, input_len: usize) -> BlockPolic
 
 fn use_custom_sequence_tables(params: &LevelParams, input_len: usize) -> bool {
     // Raw-literal inputs also skip custom sequence tables.
-    if keeps_raw_literals(params, input_len) {
-        return false;
-    }
-
-    if (32768..=zrip_core::frame::MAX_BLOCK_SIZE).contains(&input_len)
-        && params.strategy == Strategy::DFast
-        && params.min_match == 4
-        && params.target_length == 1
-        && params.search_strength < 5
-    {
-        return false;
-    }
-    true
+    !keeps_raw_literals(params, input_len)
 }
 
 /// Returns the maximum hash_log for a given level.
@@ -212,43 +197,36 @@ pub fn max_hash_log(level: i32) -> Option<u32> {
 fn level_params_inner(level: i32) -> Option<LevelParams> {
     Some(match level {
         0 => return level_params_inner(DEFAULT_LEVEL),
-        // zrip's own level: L-7 with a larger step and faster acceleration
-        // through regions without matches.
-        -8 => LevelParams {
+        // The fastest level, for LZ4's niche: raw literals, as in C zstd,
+        // and only matches of eight bytes or more (`min_match` 8 hashes and
+        // confirms eight bytes), so frames decode with few sequences and no
+        // Huffman tables. It steps 3 bytes and grows the step every 16 bytes
+        // without a match. L-8, a separate level before, runs as L-7.
+        -8 | -7 => LevelParams {
             strategy: Strategy::Fast,
             window_log: 19,
             hash_log: 13,
             chain_log: 13,
             search_log: 0,
-            min_match: 6,
-            target_length: 21,
-            search_strength: 5,
-            force_raw_literals: false,
+            min_match: 8,
+            target_length: 2,
+            search_strength: 4,
+            force_raw_literals: true,
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
-        -7 => LevelParams {
-            strategy: Strategy::Fast,
-            window_log: 19,
-            hash_log: 13,
-            chain_log: 13,
-            search_log: 0,
-            min_match: 6,
-            target_length: 17,
-            search_strength: 7,
-            force_raw_literals: false,
-            #[cfg(feature = "ldm")]
-            ldm_params: None,
-        },
+        // L-6 to L-4 hash 8 or 7 bytes. With Huffman literals, longer
+        // matches at shorter steps beat 6-byte matches at long steps on both
+        // ratio and speed, as fewer bytes are left to code as literals.
         -6 => LevelParams {
             strategy: Strategy::Fast,
             window_log: 19,
             hash_log: 13,
             chain_log: 13,
             search_log: 0,
-            min_match: 6,
-            target_length: 13,
-            search_strength: 7,
+            min_match: 8,
+            target_length: 9,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -259,9 +237,9 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             hash_log: 13,
             chain_log: 13,
             search_log: 0,
-            min_match: 6,
-            target_length: 9,
-            search_strength: 7,
+            min_match: 8,
+            target_length: 5,
+            search_strength: 6,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -272,9 +250,9 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             hash_log: 13,
             chain_log: 13,
             search_log: 0,
-            min_match: 6,
-            target_length: 5,
-            search_strength: 7,
+            min_match: 7,
+            target_length: 4,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -344,28 +322,31 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
+        // C zstd's level 3 tables. The step grows every 16 bytes without a
+        // match (C: 256), so data with few matches encodes fast.
         3 => LevelParams {
             strategy: Strategy::DFast,
             window_log: 21,
-            hash_log: 18,
-            chain_log: 18,
+            hash_log: 17,
+            chain_log: 16,
             search_log: 1,
-            min_match: 4,
+            min_match: 5,
             target_length: 1,
-            search_strength: 5,
+            search_strength: 4,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
+        // C zstd's level 4 tables, with a 16 MiB window.
         4 => LevelParams {
             strategy: Strategy::DFast,
             window_log: 24,
-            hash_log: 20,
-            chain_log: 20,
+            hash_log: 18,
+            chain_log: 18,
             search_log: 0,
-            min_match: 4,
+            min_match: 5,
             target_length: 1,
-            search_strength: 8,
+            search_strength: 6,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,

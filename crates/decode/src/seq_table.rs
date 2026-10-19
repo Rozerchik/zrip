@@ -1,12 +1,7 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 use zrip_core::fse::{
     FSE_SEQ_TABLE_CAPACITY, FseDecodeEntry, FseSeqDecodeEntry, LL_BASELINE_TABLE, LL_BITS_TABLE,
     ML_BASELINE_TABLE, ML_BITS_TABLE,
 };
-
-#[cfg(not(feature = "paranoid"))]
-use core::mem::MaybeUninit;
 
 /// A bit count below 32. Every sequence field and state transition reads
 /// fewer bits. As an enum its range reaches the compiler with each load, so
@@ -127,9 +122,6 @@ impl From<FseSeqDecodeEntry> for SeqEntry {
 
 pub(crate) struct SeqTable {
     initialized: usize,
-    #[cfg(not(feature = "paranoid"))]
-    data: [MaybeUninit<SeqEntry>; FSE_SEQ_TABLE_CAPACITY],
-    #[cfg(feature = "paranoid")]
     data: [SeqEntry; FSE_SEQ_TABLE_CAPACITY],
 }
 
@@ -155,23 +147,13 @@ impl SeqTable {
     fn empty(initialized: usize) -> Self {
         Self {
             initialized,
-            #[cfg(not(feature = "paranoid"))]
-            data: [const { MaybeUninit::uninit() }; FSE_SEQ_TABLE_CAPACITY],
-            #[cfg(feature = "paranoid")]
             data: [SeqEntry::new(0, 0, 0, 0); FSE_SEQ_TABLE_CAPACITY],
         }
     }
 
     #[inline(always)]
     fn set(&mut self, idx: usize, entry: SeqEntry) {
-        #[cfg(not(feature = "paranoid"))]
-        {
-            self.data[idx] = MaybeUninit::new(entry);
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            self.data[idx] = entry;
-        }
+        self.data[idx] = entry;
     }
 
     #[inline(always)]
@@ -181,18 +163,6 @@ impl SeqTable {
     }
 
     /// The row for `idx`, which the caller masks below the capacity.
-    #[cfg(not(feature = "paranoid"))]
-    #[inline(always)]
-    pub(crate) unsafe fn get(&self, idx: usize) -> &SeqEntry {
-        debug_assert!(idx < self.initialized);
-        // SAFETY: The FSE state machine bounds idx to [0, 1 << accuracy_log).
-        // promote_* and fill_* initialize all entries in that range.
-        // set_single is used only for RLE tables, whose state is always zero.
-        unsafe { self.data[idx].assume_init_ref() }
-    }
-
-    /// The row for `idx`, which the caller masks below the capacity.
-    #[cfg(feature = "paranoid")]
     #[inline(always)]
     pub(crate) fn get(&self, idx: usize) -> &SeqEntry {
         debug_assert!(idx < self.initialized);
@@ -288,7 +258,7 @@ mod tests {
         let mut table = SeqTable::promote_ll(&fse);
         table.set_single(seq_entry(17));
 
-        assert_eq!(paranoid_unsafe_call!(table.get(0)).baseline_value, 17);
+        assert_eq!(table.get(0).baseline_value, 17);
     }
 
     #[test]
@@ -317,9 +287,9 @@ mod tests {
         ];
         let table = SeqTable::promote_of(&fse);
 
-        assert_eq!(paranoid_unsafe_call!(table.get(0)).baseline_value, 1);
-        assert_eq!(paranoid_unsafe_call!(table.get(1)).baseline_value, 2);
-        assert_eq!(paranoid_unsafe_call!(table.get(3)).extra_bits.get(), 3);
+        assert_eq!(table.get(0).baseline_value, 1);
+        assert_eq!(table.get(1).baseline_value, 2);
+        assert_eq!(table.get(3).extra_bits.get(), 3);
     }
 
     #[test]

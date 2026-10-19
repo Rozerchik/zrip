@@ -28,11 +28,16 @@ Const-generic dispatch on minimum match length via
 |-----|---------------|----------------|
 | 4   | `hash4` (PRIME32_1) | custom params only |
 | 5   | `hash5` (PRIME64_1) | custom params only |
-| 6   | `hash6` (PRIME64_1) | -8..2 |
+| 6   | `hash6` (PRIME64_1) | -6..2 |
 | 7   | `hash7` (custom PRIME7) | custom params only |
+| 8   | `hash8` (PRIME64_1) | -7 |
 
-MLS 6 also fixes `HASH_LOG` for hash logs 13 to 16, so the hash shift is a
-constant.
+MLS 5 to 7 set the hash width only: as in C zstd, a match needs four equal
+bytes. MLS 8 is zrip's own and also needs eight equal bytes, so it finds
+fewer, longer matches.
+
+MLS 6 also fixes `HASH_LOG` for hash logs 13 to 16, and MLS 8 for hash log
+13, so the hash shift is a constant.
 
 The Fast match finder does not prefetch. Its hash tables are 32-256 KiB,
 and prefetching measured 2-4% slower.
@@ -44,51 +49,93 @@ early (the block is emitted raw).
 
 ### DFast strategy (`crates/encode/src/dfast.rs`)
 
-Dual hash tables: short (4-byte matches, `chain_log`) + long (8-byte matches,
-`hash_log`). Same 4-cursor pipeline adapted for two tables with prefetch for
-both. `search_log` controls when to try improving a short match with a long
-match. Same incompressibility bail-out as Fast.
+Dual hash tables: short (`min_match` bytes, 4 or 5, `chain_log`) and long
+(8 bytes, `hash_log`). The loop follows C zstd's
+`ZSTD_compressBlock_doubleFast`: one position at a time, rep 0 checked one
+byte ahead, then the long table, then the short table. A short match also
+tries the long table at the next position and takes it when longer. The step
+grows by one every `1 << search_strength` bytes without a match. After a
+match, two positions per table go back into the tables and rep 1 matches
+are taken at once. On the Silesia corpus it emits within 1% of C zstd's
+sequence count at the same parameters.
+
+Candidates count when they lie at or after the window start for the block
+end, as in C zstd: table entries always lie behind the search, so one
+compare checks them. `search_log` is unused.
+
+An earlier 2-cursor finder probed two positions per step. It ran 36% more
+instructions than C zstd's L3, and on data with few matches it hardly
+searched: on 1 MiB x-ray slices it found 11 sequences per KiB, against 71
+for C zstd.
 
 
 ### Level parameters (`crates/encode/src/strategy.rs`)
 
-Based on C zstd's `ZSTD_defaultCParameters` table, with L-8 added by zrip.
-Level 0 is not a separate parameter set; it maps to the library default,
-currently level 1.
+Based on C zstd's `ZSTD_defaultCParameters` table, except L-7 to L-4. Level
+0 is not a separate parameter set; it maps to the library default, currently
+level 1. Level -8, a separate zrip level in earlier versions, runs as L-7.
 
 | Level | Strategy | Hash table | Window | Min match | Target | Search log | Search strength | Notes |
 |------:|:---------|:-----------|:-------|:---------:|-------:|-----------:|----------------:|:------|
-| -8 | Fast | 32 KiB | 512 KiB | 6 | 21 | 0 | 5 | zrip-only |
-| -7 | Fast | 32 KiB | 512 KiB | 6 | 17 | 0 | 7 | |
-| -6 | Fast | 32 KiB | 512 KiB | 6 | 13 | 0 | 7 | |
-| -5 | Fast | 32 KiB | 512 KiB | 6 | 9 | 0 | 7 | |
-| -4 | Fast | 32 KiB | 512 KiB | 6 | 5 | 0 | 7 | |
+| -7 | Fast | 32 KiB | 512 KiB | 8 | 2 | 0 | 4 | raw literals; zrip's own search |
+| -6 | Fast | 32 KiB | 512 KiB | 8 | 9 | 0 | 5 | |
+| -5 | Fast | 32 KiB | 512 KiB | 8 | 5 | 0 | 6 | |
+| -4 | Fast | 32 KiB | 512 KiB | 7 | 4 | 0 | 5 | |
 | -3 | Fast | 64 KiB | 512 KiB | 6 | 4 | 0 | 7 | |
 | -2 | Fast | 64 KiB | 512 KiB | 6 | 3 | 0 | 7 | |
 | -1 | Fast | 64 KiB | 512 KiB | 6 | 2 | 0 | 7 | |
 | 1 | Fast | 128 KiB | 512 KiB | 6 | 1 | 0 | 7 | default |
 | 2 | Fast | 256 KiB | 1 MiB | 6 | 1 | 0 | 7 | |
-| 3 | DFast | 2x 1 MiB | 2 MiB | 4 | 1 | 1 | 5 | Dual hash; 32-128 KiB uses strength 7 |
-| 4 | DFast | 2x 4 MiB | 16 MiB | 4 | 1 | 0 | 8 | Dual hash |
+| 3 | DFast | 512 + 256 KiB | 2 MiB | 5 | 1 | 1 | 4 | C's L3 tables |
+| 4 | DFast | 2x 1 MiB | 16 MiB | 5 | 1 | 0 | 6 | C's L4 tables |
 
 Negative levels trade ratio for throughput by increasing `target_length`
 (skip acceleration). Higher `target_length` means more positions are skipped
 on consecutive match-finding misses.
 
-**L-8** is L-7 with a larger step and a lower search strength, so the skip
-distance grows faster through regions without matches. It keeps the full
-encode pipeline and trades a little ratio for speed.
+**L-7** aims at LZ4's niche. It keeps literals raw at every input size, as C
+zstd does at its negative levels, with predefined sequence tables, and takes
+only matches of eight bytes or more. On the Silesia corpus that makes 29
+sequences per KiB, against 40 for C zstd's L-7 frames and 53 for LZ4, so its
+frames decode fast. Its search steps 3 bytes, denser than C's L-7 (8) and
+the old zrip L-7 (18), and the step grows every 16 bytes without a match,
+for a ratio of 1.90 against 1.94 for C's L-7 and for LZ4. Growing it every
+32 bytes reached 1.96, but encoded medium files only 3% faster than L-6. It
+replaced an L-7 with Huffman literals that was only 4% faster than L-6.
+Raw-literal variants with 6-byte matches either encoded slower than L-6 or
+compressed no better than 8-byte matches.
 
-**L-8 through L2** use the full encode pipeline: Huffman-compressed literals
+**L-6 to L-4** hash 8 bytes (L-4: 7) and step 10, 6 and 5 bytes, with the step
+growing every 32 or 64 bytes without a match. They used 6-byte matches at
+steps of 14, 10 and 6, growing every 128 bytes, which left many bytes to
+Huffman coding, the costlier part. On the Silesia corpus L-6 now encodes at
+476 MB/s (was 410) at the same ratio, 2.18; L-5 at 437 MB/s (390) to 2.30
+(2.27); L-4 at 386 MB/s (356) to 2.42 (2.43). The gap to L-7 comes from its
+raw literals, not its search: with Huffman literals, medium-compressibility
+files encode at about 470 MB/s at most whatever the step, and raw-literal
+searches denser than L-7's encode slower than L-6 before they reach its ratio.
+On osdb and sao, whose literals L-6 keeps raw, L-6 encodes faster than L-7,
+and on osdb it compresses worse.
+
+**L-6 through L2** use the full encode pipeline: Huffman-compressed literals
 (with treeless reuse across blocks) and predefined or custom FSE tables for
 sequences, whichever produces smaller output.
 
-**L3 and L4** use the DFast strategy with two hash tables (short 4-byte and
-long 8-byte matches) for better match quality at lower throughput.
+**L3 and L4** use the DFast strategy with C zstd's L3 and L4 tables. C
+grows the step every 256 bytes without a match; L3 does so every 16 bytes,
+so data with few matches encodes fast. On the Silesia corpus L3 compresses
+to 3.16 at 173 MB/s (C: 3.21 at 190 MB/s); on sao and x-ray, 1.32 at 116 MB/s
+(C: 1.35 at 101 MB/s). Growing it every 8 bytes cost small text inputs up to
+10% in ratio. L4 grows it every 64 bytes and keeps a 16 MiB window: 3.26 at
+161 MB/s (C: 3.26 at 188 MB/s). The remaining gap splits between extra
+instructions in the finder and per-sequence work outside it; L2 trails C
+zstd by as much. A 4-byte short hash helped only text inputs under 16 KiB,
+at up to 30% of their speed; a 6-byte one cut L3's ratio on sao and x-ray
+to L2's.
 
 **Raw literals decision.** The negative levels keep dense literals raw:
 Huffman coding costs more time than it saves on them. `block_policy` in
-`strategy.rs` sets an order-0 entropy limit of 6.25 bits per byte at L-8 to
+`strategy.rs` sets an order-0 entropy limit of 6.25 bits per byte at L-6 to
 L-1. `encode_literals_section` measures the full
 histogram for up to 4 KiB of literals and a 4 KiB sample for longer runs.
 
@@ -101,11 +148,12 @@ smaller than the raw bytes also stay raw.
 
 Small inputs on the negative levels keep all literals raw and use predefined
 sequence tables (`raw_literals_limit`): up to 2 KiB at L-1, growing 1.5x or
-1.33x per level to 24 KiB at L-8. Building a Huffman table costs a few
-microseconds regardless of input size, which dominates messages of a few
-KiB. Without Huffman, matches are the only compression, so the negative
-levels use a denser match search on these inputs (`small_input_search`:
-target length 8 at L-8 down to 1 at L-1, 5-byte minimum match). These inputs
+1.33x per level to 12 KiB at L-6 (L-7 keeps literals raw at every size).
+Building a Huffman table costs a few microseconds regardless of input size,
+which dominates messages of a few KiB. Without Huffman, matches are the only
+compression, so L-6 to L-1 use a denser match search on these inputs
+(`small_input_search`: target length 4 at L-6 down to 1 at L-1, 5-byte hash).
+L-7 keeps its own search. These inputs
 also skip the incompressibility sampling (`skip_match_search`), which costs
 about as much as their match search.
 
@@ -314,23 +362,29 @@ Enable via `Options::ldm(true)` (requires the `ldm` feature, on by default).
 
 ### Sequence execution (`crates/decode/src/exec.rs`)
 
-`#![forbid(unsafe_code)]` under `paranoid`; the copies it calls live in
-`fast_vec.rs`. One safe Rust loop handles all platforms, shaped after C
+The copies it calls live in `fast_vec.rs`. One safe Rust loop handles all platforms, shaped after C
 zstd's `ZSTD_decompressSequences_body`:
 
-- **Bit reader.** `SeqBits` counts unread bits in a 64-bit container, so a
-  read is one shift and one `bzhi`. It is a small `Copy` value that takes
-  the stream on each refill, so it stays in registers. The loop refills once
-  per sequence, after the state update, and once more only when a
-  sequence's extra bits exceed 31 (`MID_RELOAD_THRESHOLD`). Reads past the
-  stream's start make the unread count wrap, and the end check rejects the
-  stream, as C's `BIT_endOfDStream` does.
+- **Bit reader.** `SeqBits` is one number, the stream's unread bits. Each
+  sequence loads the word that holds its next 57 or more bits (`Word`),
+  counts the word's unread bits, so a read is one shift and one `bzhi`, and
+  turns the rest back into one number. A second word comes only when a
+  sequence's extra bits exceed 31 (`MID_RELOAD_THRESHOLD`). Carrying one
+  value instead of C's container, fill and position frees two registers in
+  a loop that spills: 14 fewer instructions per sequence and about 7% faster
+  decoding. Streams under eight bytes are read from a zero-padded copy.
+  Reads past the stream's start make the count wrap to a huge value that
+  never returns to zero, and the end check rejects the stream, as C's
+  `BIT_endOfDStream` does.
 - **Rows.** `SeqEntry` holds the next state's base and bit count and the
   value's baseline and extra-bit count. Both counts are a 32-variant
   `#[repr(u8)]` enum (`BitCount`): its range reaches LLVM with every load,
   so the `bzhi` needs no `& 63`. The loop copies each row out. Holding
   references instead made LLVM move the state updates across the loop's back
-  edge and spill them.
+  edge and spill them. Packing each row into a `u64` cost 11 more
+  instructions per sequence, and decoding 16 to 64 sequences ahead of their
+  copies cost 15 more. Packing the older repeat offsets into one word saved
+  5 instructions but measured 1-2% slower.
 - **Output.** `SeqOut` moves the caller's `Vec` into a local for the block,
   so its pointer and length stay in registers. Behind a `&mut Vec`, every
   byte store may alias the vector's header, and each copy reloaded and stored
@@ -343,7 +397,13 @@ zstd's `ZSTD_decompressSequences_body`:
   its readable bytes, and the offset. Everything else (literal overruns,
   matches into a dictionary's history, invalid offsets, runs near the end of
   the literals) goes to the `#[cold]` `execute_exact`, which checks in the
-  original error order.
+  original error order. For outputs below 4 GiB, the positions are masked to
+  32 bits and the limit test reads `match_end + WILDCOPY_OVERLENGTH <= len`.
+  The sums then cannot overflow, so the three tests imply the bounds of each
+  copy's first chunk, and LLVM drops those checks. Later chunks keep theirs.
+  The offset test is a `checked_sub`, so LLVM also knows that the match
+  source lies below `lit_end`; a plain subtraction left a bounds check on
+  the source's first chunk.
 - **Literals.** `decode_literals_ws` leaves 32 zero bytes after the literals
   it decodes into the workspace, and borrows raw literals in place when the
   block holds 32 more bytes after them, so literal copies need no
@@ -432,23 +492,16 @@ them, so the sequence loop copies literals in whole chunks.
 
 ### Wild copies (`crates/decode/src/fast_vec.rs`)
 
-All unsafe gated by `#[cfg(not(feature = "paranoid"))]`.
-
-- **Sequence copies** (`SeqOut`, `Dst`). Literals copy 16 bytes
-  unconditionally, then 32-byte chunks. Matches with offsets of 32 or more
+- **Sequence copies** (`SeqOut`, `Dst`). Literals copy 32 bytes
+  unconditionally, then more 32-byte chunks. Matches with offsets of 32 or more
   copy 32-byte chunks, offsets of 16 to 31 copy 16-byte chunks, and shorter
   offsets spread the period to a distance of at least eight the C zstd way
   (`ZSTD_overlapCopy8`, `spread_match`) before copying 8-byte chunks. Each
   chunk is read whole before it is written. A copy may write up to 31 bytes
-  past its sequence, inside the reserved overlength.
-- **Single-sequence blocks** (`BlockOutput`). Tiered copies:
-  `wild_copy_match_single_unchecked` for wide offsets, offset 1 via
-  `write_bytes`, 8-15 via 8-byte copies, and 2-7 via pattern stamping
-  (`build_pattern_u64`).
-
-Under `paranoid`, `SeqOut` zeroes each block's room and runs the same chunked
-copies on an initialized slice; `BlockOutput` falls back to
-`extend_from_slice` and `extend_from_within`.
+  past its sequence, inside the overlength. `SeqOut` zeroes each block's room,
+  so the copies index an initialized slice.
+- **Single-sequence blocks** (`BlockOutput`). Appends with
+  `extend_from_slice` and `extend_from_within`.
 
 
 ## CPU feature dispatch
@@ -458,14 +511,11 @@ Two dispatch mechanisms coexist:
 **Decoder:** `fearless_simd::dispatch!` with a cached `OnceLock<Level>`. The
 macro compiles `decode_execute_sequences` with platform-specific target features
 (AVX2+BMI2 on x86_64, NEON on aarch64, SIMD128 on wasm32) and selects the best
-version at runtime when the `simd` feature is enabled. Zero `unsafe` in user
-code. Works under `paranoid` since `fearless_simd` requires no unsafe. Without
-`std` or `simd`, the scalar path runs directly.
+version at runtime when the `simd` feature is enabled, with no `unsafe` in
+zrip. Without `std` or `simd`, the scalar path runs directly.
 
-**Huffman BMI2:** `crates/core/src/simd/mod.rs` defines a `CpuTier` enum
-(`Bmi2`/`Avx2` on x86_64). Runtime detection cached in `OnceLock<CpuTier>`.
-The Huffman 4-stream decoder dispatches to a `#[target_feature(enable = "bmi2")]`
-variant for faster bit extraction.
+**Huffman:** the 4-stream decoder has one build. It gets BMI2's `shrx` and
+`bzhi` only when the build targets a CPU with BMI2.
 
 **Compile-time tier for no_std.** Falls back to `cfg!(target_feature = "...")`
 checks when std is unavailable.
@@ -478,15 +528,15 @@ Const generics eliminate dead code at compile time:
 - `compress_fast_block_impl::<HASH_LOG, MLS>`: LLVM specializes per MLS (4, 5, 7),
   dead-code eliminates unused hash/match paths.
 - `compress_dfast_block_impl::<HASH_LOG, SHORT_LOG, MLS>`: same for DFast,
-  with fixed hash logs for L3 (18) and L4 (20).
+  with fixed table logs for L3 (17/16), L4 (18/18) and the equal logs 15-17
+  that smaller inputs clamp them to.
 - `hash_val::<HASH_LOG, MLS>`: selects hash4/hash5/hash6/hash7 at compile time.
 
-**Paranoid match finders.** A fixed `HASH_LOG` also lets the paranoid build
-index hash tables without checks: `exact_table` cuts each table to exactly
-`1 << HASH_LOG` entries, so the compiler sees every hash in bounds. The finders
-pass the bytes read for hashing to `rd32_again`/`rd64_again`, which the
-paranoid build answers from those bytes instead of reading again. The default
-build reads again: a load is cheaper than keeping the bytes in a register.
+**Bounds checks in the match finders.** A fixed `HASH_LOG` also lets the
+finders index hash tables without checks: `exact_table` cuts each table to
+exactly `1 << HASH_LOG` entries, so the compiler sees every hash in bounds.
+The Fast finder passes the bytes read for hashing to `rd64_again`, which
+answers from those bytes instead of reading again.
 DFast also clamps its reads to `ilimit` (`rd64_upto`), turning two bounds
 checks into a conditional move. The Fast finder keeps checked reads: clamps
 measured 3% slower there, because a conditional move delays the load while a
@@ -522,51 +572,21 @@ rebuilding from raw dictionary entries. Avoids 3 intermediate Vec allocations
 per frame.
 
 
-## Unsafe boundary
+## No unsafe
 
-Decode execution (`exec.rs`) and sequence parsing (`sequences.rs`) are
-`#![forbid(unsafe_code)]`. Platform dispatch is handled by
-`fearless_simd::dispatch!`, which encapsulates `#[target_feature]` calling
-internally.
-
-Encoder unsafe is confined to `encode/src/primitives.rs` (16 blocks):
-
-- **Unchecked hash table access** (`hash_load`, `hash_store`).
-  `get_unchecked`/`get_unchecked_mut` eliminates bounds checks in the
-  hot loop.
-- **Unaligned 4/8-byte reads** (`rd32`, `rd64`). `read_unaligned` for
-  hash input, match confirmation, and match counting.
-- **Pointer-based match counting** (`count_match_raw`). Compares 8 bytes
-  at a time via XOR + `trailing_zeros()`. Falls to a byte loop for the
-  tail.
-- **16-byte literal copy** (`copy_literals_fast`). For len <= 16: two
-  unconditional 8-byte copies (overlapping ok). For len > 16:
-  `copy_nonoverlapping`.
-- **Unchecked bitstream flush** (`bitstream_flush`). Direct
-  `write_unaligned` into Vec at known-valid position.
-- **Unchecked Vec write-at** (`vec_write_at`). Writes into uninitialized
-  Vec capacity without updating len.
-- **Cold panic path** (`cold_rep_panic`). `#[cold] #[inline(never)]`
-  keeps panic code out of the hot path.
-
-Each function has a `debug_assert!` guard. Pattern:
-```rust
-debug_assert!(pos + 4 <= src.len());
-unsafe { (src.as_ptr().add(pos) as *const u32).read_unaligned() }
-```
-
-Core crate unsafe follows the same pattern in `bitstream/`, `huffman/`,
-`xxhash/` primitives modules.
-
-Decoder support unsafe lives in `decode/src/fast_vec.rs` (wild-copy and Vec
-length primitives) and `decode/src/seq_table.rs` (`MaybeUninit` FSE table
-reads).
+All four crates are `#![forbid(unsafe_code)]`. Platform dispatch goes through
+`fearless_simd`, which keeps the `#[target_feature]` calls inside that crate.
+Hot loops avoid bounds checks by construction: tables cut to their exact size
+(`exact_table`), reads clamped to a limit the compiler can prove
+(`rd64_upto`), bytes reused across checks (`rd64_again`), and output rooms
+zeroed ahead so copies index initialized slices.
 
 
 ## Core bitstream primitives
 
-**Unaligned u64 read/write** (`bitstream/primitives.rs`). `read_unaligned`/
-`write_unaligned` for 8-byte operations in all bit readers and writers.
+**Little-endian u64 read/write** (`bitstream/primitives.rs`). `from_le_bytes`
+reads and `copy_from_slice` writes for 8-byte operations in all bit readers
+and writers.
 
 **BitWriter batch flush** (`bitstream/writer.rs`). Accumulates bits in a u64
 register, flushes when >= 32 bits. Single unaligned write per flush.
@@ -574,17 +594,9 @@ register, flushes when >= 32 bits. Single unaligned write per flush.
 
 ## `paranoid` feature
 
-`cargo build --features paranoid` adds `#![forbid(unsafe_code)]` to all four
-crate roots. `fearless_simd` dispatch still works (it requires no unsafe), so
-the decoder gets full SIMD multiversioning under paranoid. What changes:
-
-- Encoder and core `primitives.rs` switch to safe alternatives via dual
-  `#[cfg(feature = "paranoid")]` / `#[cfg(not(feature = "paranoid"))]` bodies:
-  direct indexing, `from_le_bytes`, `resize` in place of unchecked operations.
-- Decoder sequence copies (`fast_vec.rs`) zero each block's output room and
-  copy within an initialized slice; single-sequence blocks fall back to
-  `extend_from_slice` and `extend_from_within`.
-- Huffman BMI2 `#[target_feature]` dispatch is gated out (uses `unsafe` call).
+No effect today. Every build is safe Rust; the feature stays so existing
+feature lists keep building, and so any future `unsafe` code can be left out
+of builds that enable it.
 
 
 ## Cross-cutting

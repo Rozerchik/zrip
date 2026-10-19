@@ -1,10 +1,8 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use zrip_core::error::DecompressError;
-use zrip_core::hint::unlikely;
+use zrip_core::hint::{likely, unlikely};
 
 pub(crate) const WILDCOPY_OVERLENGTH: usize = 64;
 
@@ -87,25 +85,15 @@ impl<'a> BlockOutput<'a> {
 
     #[inline(always)]
     fn extend_slice_range_in_block(&mut self, src: &[u8], start: usize, len: usize) {
-        #[cfg(not(feature = "paranoid"))]
-        unsafe {
-            debug_assert!(self.vec.len() + len + WILDCOPY_OVERLENGTH <= self.vec.capacity());
-            // SAFETY: The caller proves `src[start..start + len]` is readable
-            // and that this write stays in the reserved block output range.
-            fast_extend_from_ptr(self.vec, src.as_ptr().add(start), len, src.len() - start);
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            // Short runs append a fixed 16 bytes and truncate: a constant-size
-            // copy has no length-dependent branches. `new` reserved the slack,
-            // so neither step reallocates.
-            if len <= 16 && src.len() - start >= 16 {
-                let end = self.vec.len() + len;
-                self.vec.extend_from_slice(&src[start..start + 16]);
-                self.vec.truncate(end);
-            } else {
-                self.vec.extend_from_slice(&src[start..start + len]);
-            }
+        // Short runs append a fixed 16 bytes and truncate: a constant-size
+        // copy has no length-dependent branches. `new` reserved the slack,
+        // so neither step reallocates.
+        if len <= 16 && src.len() - start >= 16 {
+            let end = self.vec.len() + len;
+            self.vec.extend_from_slice(&src[start..start + 16]);
+            self.vec.truncate(end);
+        } else {
+            self.vec.extend_from_slice(&src[start..start + len]);
         }
     }
 }
@@ -155,19 +143,7 @@ impl SequenceOutput<'_, '_> {
             return Ok(());
         }
 
-        #[cfg(not(feature = "paranoid"))]
-        unsafe {
-            debug_assert!(
-                self.output.vec.len() + len + WILDCOPY_OVERLENGTH <= self.output.vec.capacity()
-            );
-            // SAFETY: `begin_sequence` proves capacity for the whole sequence,
-            // and the offset check proves an initialized source.
-            wild_copy_match_single_unchecked(self.output.vec, offset, len);
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            wild_copy_match_paranoid(self.output.vec, offset, len);
-        }
+        wild_copy_match(self.output.vec, offset, len);
         Ok(())
     }
 
@@ -208,20 +184,7 @@ impl SequenceOutput<'_, '_> {
             return Ok(());
         }
 
-        #[cfg(not(feature = "paranoid"))]
-        unsafe {
-            debug_assert!(
-                self.output.vec.len() + len + WILDCOPY_OVERLENGTH <= self.output.vec.capacity()
-            );
-            // SAFETY: `begin_sequence` proves capacity for the whole sequence.
-            // The offset check proves the match source starts in initialized
-            // output. Each copy arm handles its overlap pattern.
-            wild_copy_match_unchecked(self.output.vec, offset, len);
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            wild_copy_match_paranoid(self.output.vec, offset, len);
-        }
+        wild_copy_match(self.output.vec, offset, len);
         Ok(())
     }
 }
@@ -233,13 +196,12 @@ pub(crate) const LITERAL_OVERREAD: usize = 32;
 ///
 /// The fast sequence path copies literals in whole chunks and reads up to
 /// [`LITERAL_OVERREAD`] bytes past a run, so it serves runs whose end plus
-/// that overread is at most `fast_end`: inside the literals and inside the
-/// bytes. The exact path serves the rest.
+/// that overread lies inside `fast`: the literals and as much slack as the
+/// bytes hold, at most `LITERAL_OVERREAD`. The exact path serves the rest.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Literals<'a> {
-    bytes: &'a [u8],
+    fast: &'a [u8],
     len: usize,
-    fast_end: usize,
 }
 
 impl<'a> Literals<'a> {
@@ -249,9 +211,8 @@ impl<'a> Literals<'a> {
         debug_assert!(len <= bytes.len());
         let len = len.min(bytes.len());
         Self {
-            bytes,
+            fast: &bytes[..(len + LITERAL_OVERREAD).min(bytes.len())],
             len,
-            fast_end: (len + LITERAL_OVERREAD).min(bytes.len()),
         }
     }
 
@@ -262,7 +223,7 @@ impl<'a> Literals<'a> {
 
     /// The literals without the slack.
     pub(crate) fn as_slice(&self) -> &'a [u8] {
-        &self.bytes[..self.len]
+        &self.fast[..self.len]
     }
 }
 
@@ -272,69 +233,56 @@ const SPREAD_ADD: [usize; 8] = [0, 1, 2, 1, 4, 4, 4, 4];
 /// Bytes then subtracted from the source (C zstd's `dec64table`).
 const SPREAD_SUB: [usize; 8] = [8, 8, 8, 7, 8, 9, 10, 11];
 
-/// One block's sequence output.
+/// One block's sequence output: the output from the frame's first byte,
+/// zeroed through the block's limit plus [`WILDCOPY_OVERLENGTH`], so the
+/// copies index an initialized slice.
 ///
-/// The caller's vector is moved in for the block, so its pointer and length
-/// stay in registers. Behind a `&mut Vec`, every byte store may alias the
-/// vector's header, so each copy reloads and stores the length, which
-/// serializes the copies. For the same reason no `&mut SeqOut` leaves the
-/// inlined hot path: the cold path gets the buffer and positions as values.
-///
-/// `new` reserves the block's maximum plus [`WILDCOPY_OVERLENGTH`] bytes; the
-/// paranoid build zeroes that room, so its copies index an initialized slice.
-pub(crate) struct SeqOut {
-    vec: Vec<u8>,
+/// Positions count from the frame's first byte, the lowest byte a match
+/// may copy from, and the block's limit is the slice's end less the
+/// overlength. The loop then keeps only the slice and the output position
+/// in registers. With `NARROW`, the slice ends below 4 GiB, and each
+/// sequence masks its positions to 32 bits ([`ix`]).
+pub(crate) struct SeqOut<'a, const NARROW: bool> {
+    buf: &'a mut [u8],
     /// Bytes of output; every byte below it is initialized.
     op: usize,
-    /// Largest `op` the block may reach.
-    limit: usize,
-    /// Lowest byte a match may copy from: the frame's first byte.
-    frame_start: usize,
 }
 
-impl SeqOut {
-    /// Takes `vec` for a block of at most `max_block` bytes whose frame starts
-    /// at `frame_start`.
+/// Zeroes the room of a block of at most `max_block` bytes appended to `vec`,
+/// whose frame starts at `frame_start`. Returns where the block's [`SeqOut`]
+/// starts in `vec` and its output position there.
+#[inline(always)]
+pub(crate) fn open_block(
+    vec: &mut Vec<u8>,
+    max_block: usize,
+    frame_start: usize,
+) -> (usize, usize) {
+    let start = vec.len();
+    let frame_start = frame_start.min(start);
+    vec.resize(start + max_block + WILDCOPY_OVERLENGTH, 0);
+    (frame_start, start - frame_start)
+}
+
+impl<'a, const NARROW: bool> SeqOut<'a, NARROW> {
+    /// The output in `buf`, which [`open_block`] returned, at position `op`.
     #[inline(always)]
-    pub(crate) fn new(mut vec: Vec<u8>, max_block: usize, frame_start: usize) -> Self {
-        let op = vec.len();
-        vec.reserve(max_block + WILDCOPY_OVERLENGTH);
-        #[cfg(feature = "paranoid")]
-        vec.resize(op + max_block + WILDCOPY_OVERLENGTH, 0);
-        Self {
-            vec,
-            op,
-            limit: op + max_block,
-            frame_start: frame_start.min(op),
-        }
+    pub(crate) fn new(buf: &'a mut [u8], op: usize) -> Self {
+        debug_assert!(op + WILDCOPY_OVERLENGTH <= buf.len());
+        Self { buf, op }
     }
 
-    /// Returns the vector, holding exactly the output written so far.
+    /// The output position.
     #[inline(always)]
-    pub(crate) fn finish(mut self) -> Vec<u8> {
-        #[cfg(not(feature = "paranoid"))]
-        // SAFETY: `op` never passes `limit`, inside the reserved capacity, and
-        // every byte below it is the vector's original content or was written
-        // by a copy.
-        unsafe {
-            self.vec.set_len(self.op);
-        }
-        #[cfg(feature = "paranoid")]
-        self.vec.truncate(self.op);
-        self.vec
+    pub(crate) fn op(&self) -> usize {
+        self.op
     }
+}
 
-    /// The buffer, valid for writes up to `limit + WILDCOPY_OVERLENGTH`.
+impl<const NARROW: bool> SeqOut<'_, NARROW> {
+    /// Largest `op` the block may reach.
     #[inline(always)]
-    fn dst(&mut self) -> Dst<'_> {
-        #[cfg(not(feature = "paranoid"))]
-        {
-            Dst(self.vec.as_mut_ptr(), core::marker::PhantomData)
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            Dst(&mut self.vec[..])
-        }
+    fn limit(&self) -> usize {
+        self.buf.len() - WILDCOPY_OVERLENGTH
     }
 
     /// Executes one sequence: `ll` literals from `lits[lp..]`, then `ml`
@@ -342,8 +290,10 @@ impl SeqOut {
     /// frame into `history`.
     ///
     /// The fast path makes three tests: the block's limit, the literals'
-    /// end against their slack, and the offset. Everything else, including the error checks
-    /// in their original order, is in the cold [`execute_exact`].
+    /// end against their slack, and the offset. Everything else, including
+    /// the error checks in their original order, is in the cold
+    /// [`execute_exact`]. With `NARROW`, the tests cover the bounds of each
+    /// copy's first chunk, and the compiler drops those checks.
     #[inline(always)]
     pub(crate) fn execute(
         &mut self,
@@ -354,31 +304,28 @@ impl SeqOut {
         offset: usize,
         history: &[u8],
     ) -> Result<(), DecompressError> {
-        let op = self.op;
-        let frame_start = self.frame_start;
+        let (op, lp) = (ix::<NARROW>(self.op), ix::<NARROW>(lp));
         let lit_end = op + ll;
         let match_end = lit_end + ml;
-        if unlikely(match_end > self.limit) {
+        if unlikely(match_end + WILDCOPY_OVERLENGTH > self.buf.len()) {
             return Err(DecompressError::CorruptSequences);
         }
-        if unlikely(
-            lp + ll + LITERAL_OVERREAD > lits.fast_end
-                || offset.wrapping_sub(1) >= lit_end - frame_start,
-        ) {
-            let span = Span {
-                op,
-                ll,
-                ml,
-                frame_start,
-            };
-            self.op = execute_exact(self.dst(), span, lits.as_slice(), lp, offset, history)?;
-            return Ok(());
+        // `checked_sub` tells the compiler that the source is at most
+        // `lit_end`, which bounds its first chunk.
+        match lit_end.checked_sub(offset) {
+            Some(src) if likely(lp + ll + LITERAL_OVERREAD <= lits.fast.len() && offset != 0) => {
+                let mut dst = Dst(self.buf);
+                dst.wild_literals(op, lits.fast, lp, ll);
+                dst.wild_match(lit_end, src, offset, ml);
+                self.op = match_end;
+                Ok(())
+            }
+            _ => {
+                let span = Span { op, ll, ml };
+                self.op = execute_exact(Dst(self.buf), span, lits.as_slice(), lp, offset, history)?;
+                Ok(())
+            }
         }
-        let mut dst = self.dst();
-        dst.wild_literals(op, lits.bytes, lp, ll);
-        dst.wild_match(lit_end, offset, ml, frame_start);
-        self.op = match_end;
-        Ok(())
     }
 
     /// Appends `lits[lp..lp + len]` exactly.
@@ -393,24 +340,23 @@ impl SeqOut {
         if unlikely(lp > lits.len() || len > lits.len() - lp) {
             return Err(DecompressError::CorruptLiterals);
         }
-        if unlikely(len > self.limit - self.op) {
+        if unlikely(len > self.limit() - self.op) {
             return Err(DecompressError::CorruptSequences);
         }
         let op = self.op;
-        self.dst().put(op, &lits[lp..lp + len]);
+        Dst(self.buf).put(op, &lits[lp..lp + len]);
         self.op += len;
         Ok(())
     }
 }
 
-/// A sequence's place in the output: where it starts, its literal and match
-/// lengths, and the frame's first byte.
+/// A sequence's place in the output: where it starts and its literal and
+/// match lengths.
 #[derive(Clone, Copy)]
 struct Span {
     op: usize,
     ll: usize,
     ml: usize,
-    frame_start: usize,
 }
 
 /// A sequence near the end of the literals, or whose offset reaches before
@@ -426,26 +372,20 @@ fn execute_exact(
     offset: usize,
     history: &[u8],
 ) -> Result<usize, DecompressError> {
-    let Span {
-        op,
-        ll,
-        ml,
-        frame_start,
-    } = span;
+    let Span { op, ll, ml } = span;
     if lp > lits.len() || ll > lits.len() - lp {
         return Err(DecompressError::CorruptLiterals);
     }
     dst.put(op, &lits[lp..lp + ll]);
     let lit_end = op + ll;
-    let reach = lit_end - frame_start;
     if offset == 0 {
         return Err(DecompressError::InvalidOffset);
     }
     let mut done = 0;
-    if offset > reach {
+    if offset > lit_end {
         // The match starts in the history before the frame and continues
         // from the frame's first byte.
-        let before = offset - reach;
+        let before = offset - lit_end;
         if before > history.len() {
             return Err(DecompressError::InvalidOffset);
         }
@@ -454,155 +394,95 @@ fn execute_exact(
         dst.put(lit_end, &history[start..start + done]);
     }
     if ml > done {
-        dst.wild_match(lit_end + done, offset, ml - done, frame_start);
+        let at = lit_end + done;
+        dst.wild_match(at, at - offset, offset, ml - done);
     }
     Ok(lit_end + ml)
 }
 
-/// A block's output buffer as the copies see it: the raw pointer, or in the
-/// paranoid build the zeroed slice. Valid for writes up to the block's limit
-/// plus [`WILDCOPY_OVERLENGTH`]; every byte below the output length is
-/// initialized.
-#[cfg(not(feature = "paranoid"))]
-struct Dst<'a>(*mut u8, core::marker::PhantomData<&'a mut [u8]>);
-
-/// A block's output buffer as the copies see it: the raw pointer, or in the
-/// paranoid build the zeroed slice. Valid for writes up to the block's limit
-/// plus [`WILDCOPY_OVERLENGTH`]; every byte below the output length is
-/// initialized.
-#[cfg(feature = "paranoid")]
+/// A block's output as the copies see it ([`SeqOut`]'s slice). Valid for
+/// writes up to the block's limit plus [`WILDCOPY_OVERLENGTH`]; every byte
+/// below the output position is initialized.
 struct Dst<'a>(&'a mut [u8]);
+
+/// `i` masked to 32 bits under `NARROW`.
+///
+/// Every position is then below 4 GiB anyway, so the mask changes nothing,
+/// but it shows the compiler that sums of positions and lengths cannot
+/// overflow. Range checks then take one compare instead of two, and checks
+/// implied by earlier ones go away.
+#[inline(always)]
+const fn ix<const NARROW: bool>(i: usize) -> usize {
+    if NARROW { i & u32::MAX as usize } else { i }
+}
 
 impl Dst<'_> {
     /// Writes `bytes` at `at`; `at + bytes.len()` is within the limit.
     #[inline(always)]
     fn put(&mut self, at: usize, bytes: &[u8]) {
-        #[cfg(not(feature = "paranoid"))]
-        // SAFETY: callers keep `at + bytes.len()` within the limit, inside the
-        // reserved capacity, and `bytes` never lies in this buffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.0.add(at), bytes.len());
-        }
-        #[cfg(feature = "paranoid")]
         self.0[at..at + bytes.len()].copy_from_slice(bytes);
     }
 
-    /// Copies `len` literals from `lits[lp..]` to `at` in whole chunks: 16
-    /// bytes, then 32-byte chunks. Requires `lp + len + LITERAL_OVERREAD <=
-    /// lits.len()` and `at + len` within the limit.
+    /// Copies `len` literals from `lits[lp..]` to `at` in whole 32-byte
+    /// chunks. Requires `lp + len + LITERAL_OVERREAD <= lits.len()` and
+    /// `at + len` within the limit.
     #[inline(always)]
     fn wild_literals(&mut self, at: usize, lits: &[u8], lp: usize, len: usize) {
         debug_assert!(lp + len + LITERAL_OVERREAD <= lits.len());
-        #[cfg(not(feature = "paranoid"))]
-        // SAFETY: the source holds `LITERAL_OVERREAD` readable bytes past the
-        // run, and the destination `WILDCOPY_OVERLENGTH` writable bytes past
-        // the limit; the last chunk starts before `len`.
-        unsafe {
-            let src = lits.as_ptr().add(lp);
-            let dst = self.0.add(at);
-            copy_16(src, dst);
-            let mut i = 16;
-            while i < len {
-                copy_32_wide(src.add(i), dst.add(i));
-                i += 32;
-            }
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            self.0[at..at + 16].copy_from_slice(&lits[lp..lp + 16]);
-            let mut i = 16;
-            while i < len {
-                self.0[at + i..at + i + 32].copy_from_slice(&lits[lp + i..lp + i + 32]);
-                i += 32;
-            }
+        self.0[at..at + 32].copy_from_slice(&lits[lp..lp + 32]);
+        let mut i = 32;
+        while i < len {
+            let (d, s) = (at + i, lp + i);
+            self.0[d..d + 32].copy_from_slice(&lits[s..s + 32]);
+            i += 32;
         }
     }
 
-    /// Copies a match of `len` bytes from `offset` bytes before `at` in
-    /// whole chunks. Requires `1 <= offset <= at - frame_start` and
-    /// `at + len` within the limit.
+    /// Copies a match of `len` bytes from `src`, `offset` bytes before `at`,
+    /// in whole chunks. Requires `1 <= offset <= at` and `at + len` within
+    /// the limit.
     #[inline(always)]
-    fn wild_match(&mut self, at: usize, offset: usize, len: usize, frame_start: usize) {
-        debug_assert!(offset >= 1 && offset <= at - frame_start);
-        let _ = frame_start;
-        #[cfg(not(feature = "paranoid"))]
-        // SAFETY: the source starts at or after the frame's first byte, inside
-        // the initialized output, and each chunk reads only bytes before the
-        // chunk it writes. Writes end at most 31 bytes past `at + len`, inside
-        // the `WILDCOPY_OVERLENGTH` room past the limit.
-        unsafe {
-            let dst = self.0.add(at);
-            let src = dst.sub(offset);
-            if offset >= 32 {
-                let mut i = 0;
-                loop {
-                    copy_32_wide(src.add(i), dst.add(i));
-                    i += 32;
-                    if i >= len {
-                        break;
-                    }
-                }
-            } else if offset >= 16 {
-                let mut i = 0;
-                loop {
-                    copy_16(src.add(i), dst.add(i));
-                    i += 16;
-                    if i >= len {
-                        break;
-                    }
-                }
-            } else {
-                spread_match(src, dst, offset, len);
+    fn wild_match(&mut self, at: usize, src: usize, offset: usize, len: usize) {
+        debug_assert!(offset >= 1 && offset <= at && src == at - offset);
+        let out = &mut *self.0;
+        if offset >= 32 {
+            chunk::<32>(out, src, at);
+            let mut i = 32;
+            while i < len {
+                chunk::<32>(out, src + i, at + i);
+                i += 32;
             }
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            let out = &mut *self.0;
-            let src = at - offset;
-            if offset >= 32 {
-                let mut i = 0;
-                loop {
-                    chunk::<32>(out, src + i, at + i);
-                    i += 32;
-                    if i >= len {
-                        break;
-                    }
+        } else if offset >= 16 {
+            chunk::<16>(out, src, at);
+            let mut i = 16;
+            while i < len {
+                chunk::<16>(out, src + i, at + i);
+                i += 16;
+            }
+        } else {
+            let mut src = src;
+            if offset < 8 {
+                for k in 0..4 {
+                    out[at + k] = out[src + k];
                 }
-            } else if offset >= 16 {
-                let mut i = 0;
-                loop {
-                    chunk::<16>(out, src + i, at + i);
-                    i += 16;
-                    if i >= len {
-                        break;
-                    }
-                }
+                src += SPREAD_ADD[offset];
+                chunk::<4>(out, src, at + 4);
+                src = src + 8 - SPREAD_SUB[offset];
             } else {
-                let mut src = src;
-                if offset < 8 {
-                    for k in 0..4 {
-                        out[at + k] = out[src + k];
-                    }
-                    src += SPREAD_ADD[offset];
-                    chunk::<4>(out, src, at + 4);
-                    src = src + 8 - SPREAD_SUB[offset];
-                } else {
-                    chunk::<8>(out, src, at);
-                    src += 8;
-                }
-                let mut i = 8;
-                while i < len {
-                    chunk::<8>(out, src, at + i);
-                    src += 8;
-                    i += 8;
-                }
+                chunk::<8>(out, src, at);
+                src += 8;
+            }
+            let mut i = 8;
+            while i < len {
+                chunk::<8>(out, src, at + i);
+                src += 8;
+                i += 8;
             }
         }
     }
 }
 
 /// Copies `N` bytes within `out`, reading them all before writing.
-#[cfg(feature = "paranoid")]
 #[inline(always)]
 fn chunk<const N: usize>(out: &mut [u8], src: usize, dst: usize) {
     let mut value = [0u8; N];
@@ -610,288 +490,8 @@ fn chunk<const N: usize>(out: &mut [u8], src: usize, dst: usize) {
     out[dst..dst + N].copy_from_slice(&value);
 }
 
-/// Copies an overlapping match with `offset < 16` the C zstd way: eight
-/// bytes that spread the period to a distance of at least eight
-/// (`ZSTD_overlapCopy8`), then eight-byte chunks.
-///
-/// # Safety
-///
-/// `src = dst - offset` with `1 <= offset < 16`, `src..dst` initialized,
-/// and `dst..dst + len + 8` writable.
-#[cfg(not(feature = "paranoid"))]
 #[inline(always)]
-unsafe fn spread_match(src: *const u8, dst: *mut u8, offset: usize, len: usize) {
-    debug_assert!((1..16).contains(&offset));
-    // SAFETY: see the function contract. Each byte or chunk is read only
-    // after every byte it covers was written: the first four bytes go one at
-    // a time, the spread then leaves the source at least eight bytes behind.
-    unsafe {
-        let mut src = src;
-        if offset < 8 {
-            *dst = *src;
-            *dst.add(1) = *src.add(1);
-            *dst.add(2) = *src.add(2);
-            *dst.add(3) = *src.add(3);
-            src = src.add(SPREAD_ADD[offset]);
-            let word = (src as *const u32).read_unaligned();
-            (dst.add(4) as *mut u32).write_unaligned(word);
-            src = src.add(8).sub(SPREAD_SUB[offset]);
-        } else {
-            copy_8(src, dst);
-            src = src.add(8);
-        }
-        let mut i = 8;
-        while i < len {
-            copy_8(src, dst.add(i));
-            src = src.add(8);
-            i += 8;
-        }
-    }
-}
-
-/// 32-byte copy as one load and one store.
-///
-/// # Safety
-///
-/// `src..src+32` must be readable and `dst..dst+32` writable.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn copy_32_wide(src: *const u8, dst: *mut u8) {
-    // SAFETY: the caller provides readable and writable 32-byte ranges;
-    // unaligned accesses are intentional.
-    unsafe {
-        let v = (src as *const [u8; 32]).read_unaligned();
-        (dst as *mut [u8; 32]).write_unaligned(v);
-    }
-}
-
-/// 16-byte copy via two u64 load/stores.
-///
-/// # Safety
-///
-/// `src..src+16` must be readable and `dst..dst+16` must be writable. The
-/// regions may overlap because both reads complete before either write.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn copy_16(src: *const u8, dst: *mut u8) {
-    debug_assert!(!src.is_null());
-    debug_assert!(!dst.is_null());
-    // SAFETY: The caller provides readable/writable 16-byte ranges. Unaligned
-    // accesses are intentional and do not require pointer alignment.
-    unsafe {
-        let a = (src as *const u64).read_unaligned();
-        let b = (src.add(8) as *const u64).read_unaligned();
-        (dst as *mut u64).write_unaligned(a);
-        (dst.add(8) as *mut u64).write_unaligned(b);
-    }
-}
-
-/// # Safety
-///
-/// `src..src+8` must be readable and `dst..dst+8` must be writable.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn copy_8(src: *const u8, dst: *mut u8) {
-    debug_assert!(!src.is_null());
-    debug_assert!(!dst.is_null());
-    // SAFETY: The caller provides readable/writable 8-byte ranges. Unaligned
-    // accesses are intentional and do not require pointer alignment.
-    unsafe {
-        let v = (src as *const u64).read_unaligned();
-        (dst as *mut u64).write_unaligned(v);
-    }
-}
-
-/// # Safety
-///
-/// `src..src+32` must be readable and `dst..dst+32` must be writable.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn copy_32(src: *const u8, dst: *mut u8) {
-    debug_assert!(!src.is_null());
-    debug_assert!(!dst.is_null());
-    // SAFETY: The caller provides readable/writable 32-byte ranges.
-    unsafe {
-        copy_16(src, dst);
-        copy_16(src.add(16), dst.add(16));
-    }
-}
-
-/// # Safety
-///
-/// `src..src+64` must be readable and `dst..dst+64` must be writable.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn copy_64(src: *const u8, dst: *mut u8) {
-    debug_assert!(!src.is_null());
-    debug_assert!(!dst.is_null());
-    // SAFETY: The caller provides readable/writable 64-byte ranges.
-    unsafe {
-        copy_16(src, dst);
-        copy_16(src.add(16), dst.add(16));
-        copy_16(src.add(32), dst.add(32));
-        copy_16(src.add(48), dst.add(48));
-    }
-}
-
-/// Copy `src` into the end of `vec` using 16-byte chunk copies.
-///
-/// All reads stay within the `avail` readable source bytes. When at least 16
-/// are available, the first 16 bytes are copied unconditionally, as C zstd
-/// does: the copy length then needs no size-class branches, which mispredict
-/// on the varying literal lengths of real data.
-///
-/// # Safety
-///
-/// `sp..sp+avail` must be readable with `len <= avail`, and `vec` must have
-/// at least `len + 16` bytes of spare capacity from its current end.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn fast_extend_from_ptr(vec: &mut Vec<u8>, sp: *const u8, len: usize, avail: usize) {
-    debug_assert!(len <= avail);
-    debug_assert!(vec.len() + len + 16 <= vec.capacity());
-    // SAFETY: The caller supplies `avail` readable source bytes and enough
-    // spare capacity for the destination, including the 16-byte headroom.
-    unsafe {
-        let dst = vec.as_mut_ptr().add(vec.len());
-        if avail >= 16 {
-            copy_16(sp, dst);
-            let mut off = 16usize;
-            while off < len {
-                copy_16(sp.add(off.min(len - 16)), dst.add(off.min(len - 16)));
-                off += 16;
-            }
-            vec.set_len(vec.len() + len);
-            return;
-        }
-        if len == 0 {
-            return;
-        }
-        if len >= 16 {
-            let mut off = 0usize;
-            while off + 16 <= len {
-                copy_16(sp.add(off), dst.add(off));
-                off += 16;
-            }
-            if off < len {
-                copy_16(sp.add(len - 16), dst.add(len - 16));
-            }
-        } else if len >= 8 {
-            copy_8(sp, dst);
-            copy_8(sp.add(len - 8), dst.add(len - 8));
-        } else if len >= 4 {
-            let a = (sp as *const u32).read_unaligned();
-            (dst as *mut u32).write_unaligned(a);
-            let b = (sp.add(len - 4) as *const u32).read_unaligned();
-            (dst.add(len - 4) as *mut u32).write_unaligned(b);
-        } else if len == 3 {
-            let a = (sp as *const u16).read_unaligned();
-            (dst as *mut u16).write_unaligned(a);
-            *dst.add(2) = *sp.add(2);
-        } else if len == 2 {
-            let a = (sp as *const u16).read_unaligned();
-            (dst as *mut u16).write_unaligned(a);
-        } else {
-            *dst = *sp;
-        }
-        vec.set_len(vec.len() + len);
-    }
-}
-
-/// Build an 8-byte repeating pattern from `offset` bytes at `src`.
-/// Only reads the first `offset` bytes (no out-of-bounds access).
-///
-/// # Safety
-///
-/// `src..src+offset` must be readable, with offset in 2..=7.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn build_pattern_u64(src: *const u8, offset: usize) -> u64 {
-    debug_assert!((2..=7).contains(&offset));
-    let mut buf = [0u8; 8];
-    // SAFETY: The caller provides offset readable bytes. The remaining copies
-    // operate wholly inside the local 8-byte buffer.
-    unsafe {
-        let p = buf.as_mut_ptr();
-        core::ptr::copy_nonoverlapping(src, p, offset);
-        let mut have = offset;
-        while have < 8 {
-            let n = have.min(8 - have);
-            core::ptr::copy_nonoverlapping(p, p.add(have), n);
-            have += n;
-        }
-    }
-    u64::from_ne_bytes(buf)
-}
-
-/// Copy a match of `len` bytes at `offset` bytes back from the end of `vec`.
-///
-/// Handles all cases: non-overlapping (offset >= 16), offset 8..15,
-/// RLE (offset == 1), and overlapping small-offset copies (2..7).
-///
-/// # Safety contract (upheld by caller):
-/// - `offset > 0 && offset <= vec.len()`
-/// - `vec.len() + len + 16 <= vec.capacity()`
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn wild_copy_match_unchecked(vec: &mut Vec<u8>, offset: usize, len: usize) {
-    debug_assert!(offset > 0 && offset <= vec.len());
-    debug_assert!(vec.len() + len + 16 <= vec.capacity());
-    // SAFETY: offset is validated above, and reserve ensures enough output
-    // headroom. Each copy arm handles its overlap pattern.
-    unsafe {
-        let ptr = vec.as_mut_ptr();
-        let op = ptr.add(vec.len());
-        let src = op.sub(offset);
-
-        if offset >= 16 {
-            let mut off = 0usize;
-            loop {
-                copy_16(src.add(off), op.add(off));
-                off += 16;
-                if off >= len {
-                    break;
-                }
-            }
-        } else if offset == 1 {
-            core::ptr::write_bytes(op, *src, len + 16);
-        } else if offset >= 8 {
-            // 8-byte copies tracking src; overlap at boundary is fine because
-            // read_unaligned completes before write_unaligned.
-            copy_8(src, op);
-            copy_8(src.add(8), op.add(8));
-            if len > 16 {
-                let mut off = 16usize;
-                loop {
-                    copy_8(src.add(off), op.add(off));
-                    copy_8(src.add(off + 8), op.add(off + 8));
-                    off += 16;
-                    if off >= len {
-                        break;
-                    }
-                }
-            }
-        } else {
-            // Offset 2..7: build 8-byte repeating pattern from individual source
-            // bytes (avoids reading uninitialized destination memory), then stamp it
-            // at offset-aligned positions.
-            let pat64 = build_pattern_u64(src, offset);
-            let mut off = 0usize;
-            loop {
-                (op.add(off) as *mut u64).write_unaligned(pat64);
-                off += offset;
-                if off >= len {
-                    break;
-                }
-            }
-        }
-        vec.set_len(vec.len() + len);
-    }
-}
-
-#[cfg(feature = "paranoid")]
-#[inline(always)]
-fn wild_copy_match_paranoid(vec: &mut Vec<u8>, offset: usize, len: usize) {
+fn wild_copy_match(vec: &mut Vec<u8>, offset: usize, len: usize) {
     let start = vec.len() - offset;
     if offset >= len {
         vec.extend_from_within(start..start + len);
@@ -906,49 +506,6 @@ fn wild_copy_match_paranoid(vec: &mut Vec<u8>, offset: usize, len: usize) {
             vec.extend_from_within(src..src + n);
             copied += n;
         }
-    }
-}
-
-/// Variant for one-sequence tiny frames. The caller reserves 64 bytes of
-/// headroom, so non-overlapping copies can use wider chunks without changing
-/// the generic multi-sequence path.
-#[cfg(not(feature = "paranoid"))]
-#[inline(always)]
-unsafe fn wild_copy_match_single_unchecked(vec: &mut Vec<u8>, offset: usize, len: usize) {
-    debug_assert!(offset > 0 && offset <= vec.len());
-    debug_assert!(vec.len() + len + 64 <= vec.capacity());
-    // SAFETY: offset is validated above, and reserve ensures the 64 bytes of
-    // wildcopy headroom required by this single-sequence variant.
-    unsafe {
-        let ptr = vec.as_mut_ptr();
-        let op = ptr.add(vec.len());
-        let src = op.sub(offset);
-
-        if len <= 16 && offset >= 16 {
-            copy_16(src, op);
-        } else if offset >= 64 {
-            let mut off = 0usize;
-            loop {
-                copy_64(src.add(off), op.add(off));
-                off += 64;
-                if off >= len {
-                    break;
-                }
-            }
-        } else if offset >= 32 {
-            let mut off = 0usize;
-            loop {
-                copy_32(src.add(off), op.add(off));
-                off += 32;
-                if off >= len {
-                    break;
-                }
-            }
-        } else {
-            wild_copy_match_unchecked(vec, offset, len);
-            return;
-        }
-        vec.set_len(vec.len() + len);
     }
 }
 
@@ -969,6 +526,23 @@ mod tests {
         expected
     }
 
+    /// Runs `f` on the output of a block of at most `max_block` bytes appended
+    /// to `vec`, then cuts `vec` to the output, as `decode_execute_sequences`
+    /// does.
+    fn with_seq_out<const NARROW: bool, R>(
+        vec: &mut Vec<u8>,
+        max_block: usize,
+        frame_start: usize,
+        f: impl FnOnce(&mut SeqOut<'_, NARROW>) -> R,
+    ) -> R {
+        let (base, op) = open_block(vec, max_block, frame_start);
+        let mut out = SeqOut::<NARROW>::new(&mut vec[base..], op);
+        let result = f(&mut out);
+        let end = base + out.op();
+        vec.truncate(end);
+        result
+    }
+
     /// Runs one sequence through `SeqOut::execute` after `prefix`, with
     /// `slack` readable bytes after the literals, and returns the output.
     fn seq_out_run(
@@ -979,18 +553,33 @@ mod tests {
         offset: usize,
         history: &[u8],
     ) -> Result<Vec<u8>, DecompressError> {
+        let narrow = seq_out_run_as::<true>(prefix, lits, slack, ml, offset, history);
+        let wide = seq_out_run_as::<false>(prefix, lits, slack, ml, offset, history);
+        assert_eq!(narrow, wide);
+        narrow
+    }
+
+    fn seq_out_run_as<const NARROW: bool>(
+        prefix: &[u8],
+        lits: &[u8],
+        slack: usize,
+        ml: usize,
+        offset: usize,
+        history: &[u8],
+    ) -> Result<Vec<u8>, DecompressError> {
         let mut buf = lits.to_vec();
         buf.resize(lits.len() + slack, 0xAA);
-        let mut out = SeqOut::new(prefix.to_vec(), lits.len() + ml, 0);
-        let result = out.execute(
-            Literals::new(&buf, lits.len()),
-            0,
-            lits.len(),
-            ml,
-            offset,
-            history,
-        );
-        let v = out.finish();
+        let mut v = prefix.to_vec();
+        let result = with_seq_out::<NARROW, _>(&mut v, lits.len() + ml, 0, |out| {
+            out.execute(
+                Literals::new(&buf, lits.len()),
+                0,
+                lits.len(),
+                ml,
+                offset,
+                history,
+            )
+        });
         result.map(|()| v)
     }
 
@@ -1109,44 +698,50 @@ mod tests {
             }
         }
         // A match may not reach before the frame's first byte.
-        let mut out = SeqOut::new(b"abcdef".to_vec(), 8, 4);
+        let mut v = b"abcdef".to_vec();
         let lits = [0u8; LITERAL_OVERREAD];
-        assert_eq!(
-            out.execute(Literals::new(&lits, 0), 0, 0, 4, 3, &[]),
-            Err(DecompressError::InvalidOffset)
-        );
-        assert_eq!(
-            out.execute(Literals::new(&lits, 0), 0, 0, 4, 2, &[]),
-            Ok(())
-        );
-        assert_eq!(out.finish(), b"abcdefefef");
+        with_seq_out::<true, _>(&mut v, 8, 4, |out| {
+            assert_eq!(
+                out.execute(Literals::new(&lits, 0), 0, 0, 4, 3, &[]),
+                Err(DecompressError::InvalidOffset)
+            );
+            assert_eq!(
+                out.execute(Literals::new(&lits, 0), 0, 0, 4, 2, &[]),
+                Ok(())
+            );
+        });
+        assert_eq!(v, b"abcdefefef");
     }
 
     #[test]
     fn seq_out_rejects_overruns() {
         let lits = [7u8; 10];
         // More literals than the section holds.
-        let mut out = SeqOut::new(b"ab".to_vec(), 32, 0);
-        assert_eq!(
-            out.execute(Literals::new(&lits, 10), 4, 8, 3, 1, &[]),
-            Err(DecompressError::CorruptLiterals)
-        );
+        let mut v = b"ab".to_vec();
+        with_seq_out::<true, _>(&mut v, 32, 0, |out| {
+            assert_eq!(
+                out.execute(Literals::new(&lits, 10), 4, 8, 3, 1, &[]),
+                Err(DecompressError::CorruptLiterals)
+            );
+        });
         // A sequence past the block's limit.
-        let mut out = SeqOut::new(b"ab".to_vec(), 8, 0);
-        assert_eq!(
-            out.execute(Literals::new(&lits, 10), 0, 4, 5, 1, &[]),
-            Err(DecompressError::CorruptSequences)
-        );
-        assert_eq!(
-            out.extend_literals(Literals::new(&lits, 10), 0, 9),
-            Err(DecompressError::CorruptSequences)
-        );
-        assert_eq!(
-            out.extend_literals(Literals::new(&lits, 10), 4, 7),
-            Err(DecompressError::CorruptLiterals)
-        );
-        assert_eq!(out.extend_literals(Literals::new(&lits, 10), 4, 6), Ok(()));
-        assert_eq!(out.finish(), b"ab\x07\x07\x07\x07\x07\x07");
+        let mut v = b"ab".to_vec();
+        with_seq_out::<true, _>(&mut v, 8, 0, |out| {
+            assert_eq!(
+                out.execute(Literals::new(&lits, 10), 0, 4, 5, 1, &[]),
+                Err(DecompressError::CorruptSequences)
+            );
+            assert_eq!(
+                out.extend_literals(Literals::new(&lits, 10), 0, 9),
+                Err(DecompressError::CorruptSequences)
+            );
+            assert_eq!(
+                out.extend_literals(Literals::new(&lits, 10), 4, 7),
+                Err(DecompressError::CorruptLiterals)
+            );
+            assert_eq!(out.extend_literals(Literals::new(&lits, 10), 4, 6), Ok(()));
+        });
+        assert_eq!(v, b"ab\x07\x07\x07\x07\x07\x07");
     }
 
     #[test]
@@ -1250,233 +845,5 @@ mod tests {
     #[test]
     fn wild_copy_match_single_offsets_97_128() {
         check_wild_copy_match_single_offsets(97, 128);
-    }
-}
-
-// Run with: cargo kani -p zrip-decode -j4 --output-format terse
-#[cfg(all(kani, not(feature = "paranoid")))]
-mod kani_proofs {
-    use super::*;
-
-    // -- Arithmetic proof: BlockOutput capacity invariant --
-
-    /// BlockOutput::new reserves block_size + WILDCOPY_OVERLENGTH spare
-    /// capacity. Prove this is sufficient for any valid sequence's
-    /// literal copy (needing 16 bytes headroom) and match copy (needing
-    /// up to WILDCOPY_OVERLENGTH = 64 bytes headroom).
-    #[kani::proof]
-    fn block_output_capacity_sufficient() {
-        let initial_len: usize = kani::any();
-        let block_size: usize = kani::any();
-        kani::assume(initial_len <= 64);
-        kani::assume(block_size >= 1 && block_size <= 64);
-
-        let capacity = initial_len + block_size + WILDCOPY_OVERLENGTH;
-        let literal_len: usize = kani::any();
-        let match_len: usize = kani::any();
-        kani::assume(literal_len <= block_size);
-        kani::assume(match_len <= block_size - literal_len);
-
-        let vec_len_after_literals = initial_len + literal_len;
-
-        // wild_copy_match_unchecked: 16-byte headroom
-        assert!(vec_len_after_literals + match_len + 16 <= capacity);
-        // wild_copy_match_{16plus,single}_unchecked: 64-byte headroom
-        assert!(vec_len_after_literals + match_len + WILDCOPY_OVERLENGTH <= capacity);
-    }
-
-    // -- Primitive: build_pattern_u64 --
-
-    /// The inner doubling loop fills exactly 8 bytes from `offset`
-    /// source bytes (offset in 2..=7) without OOB reads or writes.
-    #[kani::proof]
-    #[kani::unwind(3)] // at most 2 doubling iterations
-    fn build_pattern_u64_no_oob() {
-        let src = [0u8; 7];
-        let offset: usize = kani::any();
-        kani::assume(offset >= 2 && offset <= 7);
-        unsafe {
-            build_pattern_u64(src.as_ptr(), offset);
-        }
-    }
-
-    // -- Primitive: fast_extend_from_ptr --
-
-    /// All copy tiers (unconditional 16-byte, 1, 2, 3, 4..7, 8..15, 16+)
-    /// stay within source and destination bounds given the documented
-    /// precondition (len <= avail readable bytes, len + 16 bytes of spare
-    /// capacity).
-    #[kani::proof]
-    #[kani::unwind(6)] // 64/16 = 4 iterations max in the 16-byte loops
-    fn fast_extend_from_ptr_no_oob() {
-        let src = [0u8; 64];
-        let len: usize = kani::any();
-        let avail: usize = kani::any();
-        kani::assume(len <= avail && avail <= 64);
-
-        let mut vec = Vec::with_capacity(len + 16);
-        unsafe {
-            fast_extend_from_ptr(&mut vec, src.as_ptr(), len, avail);
-        }
-        assert_eq!(vec.len(), len);
-    }
-
-    // -- wild_copy_match_unchecked --
-    //
-    // Split by offset tier to control loop-unwind bounds. Each harness
-    // establishes the documented precondition (offset > 0, offset <=
-    // vec.len(), capacity >= vec.len() + len + 16) and proves the
-    // corresponding code path stays in-bounds.
-    //
-    // Pre-fill uses extend_from_slice (memcpy, no loop) to avoid
-    // triggering unwind limits in Vec::resize's internal loop.
-
-    /// offset >= 16: copy_16 loop
-    #[kani::proof]
-    #[kani::unwind(4)] // 48/16 = 3 iterations max
-    fn wild_copy_match_offset_ge16_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 16 && offset <= 48);
-        kani::assume(len >= 1 && len <= 48);
-
-        let mut vec = Vec::with_capacity(48 + len + 16);
-        vec.extend_from_slice(&[0u8; 48]);
-        unsafe {
-            wild_copy_match_unchecked(&mut vec, offset, len);
-        }
-        assert_eq!(vec.len(), 48 + len);
-    }
-
-    /// offset == 1: RLE via write_bytes (no loop in this path, but
-    /// Kani still needs an unwind bound for loops in sibling branches)
-    #[kani::proof]
-    #[kani::unwind(2)]
-    fn wild_copy_match_offset_1_no_oob() {
-        let len: usize = kani::any();
-        kani::assume(len >= 1 && len <= 64);
-
-        let mut vec = Vec::with_capacity(4 + len + 16);
-        vec.extend_from_slice(&[0xAAu8; 4]);
-        unsafe {
-            wild_copy_match_unchecked(&mut vec, 1, len);
-        }
-        assert_eq!(vec.len(), 4 + len);
-    }
-
-    /// offset 8..15: copy_8 pairs loop
-    #[kani::proof]
-    #[kani::unwind(4)] // (48-16)/16 = 2 iterations max in inner loop
-    fn wild_copy_match_offset_8to15_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 8 && offset <= 15);
-        kani::assume(len >= 1 && len <= 48);
-
-        let mut vec = Vec::with_capacity(16 + len + 16);
-        vec.extend_from_slice(&[0u8; 16]);
-        unsafe {
-            wild_copy_match_unchecked(&mut vec, offset, len);
-        }
-        assert_eq!(vec.len(), 16 + len);
-    }
-
-    /// offset 2..7: build_pattern_u64 + u64 stamp loop
-    #[kani::proof]
-    #[kani::unwind(13)] // 24/2 = 12 iterations max (offset=2, len=24)
-    fn wild_copy_match_offset_2to7_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 2 && offset <= 7);
-        kani::assume(len >= 1 && len <= 24);
-
-        let mut vec = Vec::with_capacity(8 + len + 16);
-        vec.extend_from_slice(&[0u8; 8]);
-        unsafe {
-            wild_copy_match_unchecked(&mut vec, offset, len);
-        }
-        assert_eq!(vec.len(), 8 + len);
-    }
-
-    // -- spread_match --
-
-    /// Offsets 1..15: the first eight bytes spread the period, then 8-byte
-    /// chunks. Reads stay in `src..dst` and the bytes already written;
-    /// writes stay in `dst..dst + len + 8`.
-    #[kani::proof]
-    #[kani::unwind(5)] // 24/8 = 3 iterations max
-    fn spread_match_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 1 && offset < 16);
-        kani::assume(len >= 1 && len <= 24);
-
-        let mut buf = [0u8; 16 + 24 + 8];
-        unsafe {
-            let dst = buf.as_mut_ptr().add(16);
-            spread_match(dst.sub(offset), dst, offset, len);
-        }
-    }
-
-    // -- wild_copy_match_single_unchecked --
-    //
-    // Split into three harnesses matching the dispatch:
-    //   len <= 16 && offset >= 16 → single copy_16
-    //   offset >= 32             → copy_32 or copy_64 loop
-    //   else                     → fallthrough to wild_copy_match_unchecked
-
-    /// Short match with wide offset: single copy_16 (no loop in this
-    /// path, but Kani needs an unwind bound for loops in sibling
-    /// branches).
-    #[kani::proof]
-    #[kani::unwind(2)]
-    fn wild_copy_match_single_short_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 16 && offset <= 48);
-        kani::assume(len >= 1 && len <= 16);
-
-        let mut vec = Vec::with_capacity(48 + len + WILDCOPY_OVERLENGTH);
-        vec.extend_from_slice(&[0u8; 48]);
-        unsafe {
-            wild_copy_match_single_unchecked(&mut vec, offset, len);
-        }
-        assert_eq!(vec.len(), 48 + len);
-    }
-
-    /// Wide offset: copy_32 or copy_64 loops.
-    #[kani::proof]
-    #[kani::unwind(3)] // 64/32 = 2 iterations max
-    fn wild_copy_match_single_wide_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 32 && offset <= 64);
-        kani::assume(len >= 1 && len <= 64);
-
-        let mut vec = Vec::with_capacity(64 + len + WILDCOPY_OVERLENGTH);
-        vec.extend_from_slice(&[0u8; 64]);
-        unsafe {
-            wild_copy_match_single_unchecked(&mut vec, offset, len);
-        }
-        assert_eq!(vec.len(), 64 + len);
-    }
-
-    /// Fallthrough to wild_copy_match_unchecked (offset < 32,
-    /// excluding the short + offset >= 16 fast path).
-    #[kani::proof]
-    #[kani::unwind(13)] // pattern stamp loop: 24/2 = 12 max
-    fn wild_copy_match_single_fallthrough_no_oob() {
-        let offset: usize = kani::any();
-        let len: usize = kani::any();
-        kani::assume(offset >= 1 && offset <= 31);
-        kani::assume(len >= 1 && len <= 24);
-        kani::assume(!(len <= 16 && offset >= 16));
-
-        let mut vec = Vec::with_capacity(32 + len + WILDCOPY_OVERLENGTH);
-        vec.extend_from_slice(&[0u8; 32]);
-        unsafe {
-            wild_copy_match_single_unchecked(&mut vec, offset, len);
-        }
-        assert_eq!(vec.len(), 32 + len);
     }
 }

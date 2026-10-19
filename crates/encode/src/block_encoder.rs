@@ -10,9 +10,8 @@ use zrip_core::Sequence;
 use zrip_core::bitstream::writer::BitWriter;
 use zrip_core::error::CompressError;
 use zrip_core::fse::{
-    FseDecodeEntry, LL_BASELINE_TABLE, LL_BITS_TABLE, LL_DEFAULT_ACCURACY, LL_DEFAULT_DIST,
-    ML_BASELINE_TABLE, ML_BITS_TABLE, ML_DEFAULT_ACCURACY, ML_DEFAULT_DIST, OF_DEFAULT_ACCURACY,
-    OF_DEFAULT_DIST,
+    FseDecodeEntry, LL_DEFAULT_ACCURACY, LL_DEFAULT_DIST, ML_DEFAULT_ACCURACY, ML_DEFAULT_DIST,
+    OF_DEFAULT_ACCURACY, OF_DEFAULT_DIST,
 };
 use zrip_core::huffman::encode::{HuffmanEncodeTable, byte_histogram};
 
@@ -69,21 +68,22 @@ struct PackedSeq {
 }
 
 /// Code counts of the last packed block, counted while packing. The tables
-/// have 64 slots so the counting needs no bounds checks.
+/// have a slot for every `u8` code, so the counting needs neither masks nor
+/// bounds checks.
 #[derive(Clone)]
 struct SeqFreqs {
-    ll: [u32; 64],
-    ml: [u32; 64],
-    of: [u32; 64],
+    ll: [u32; 256],
+    ml: [u32; 256],
+    of: [u32; 256],
     extra_bits: u64,
 }
 
 impl Default for SeqFreqs {
     fn default() -> Self {
         Self {
-            ll: [0; 64],
-            ml: [0; 64],
-            of: [0; 64],
+            ll: [0; 256],
+            ml: [0; 256],
+            of: [0; 256],
             extra_bits: 0,
         }
     }
@@ -501,7 +501,7 @@ fn encode_compressed_block_impl(
 
     let saved_rep = *rep_offsets;
 
-    pack_sequences_and_literals(src, sequences, rep_offsets, workspace);
+    pack_sequences_and_literals::<true>(src, sequences, rep_offsets, workspace);
 
     let raw_literals = encode_literals_section(
         &workspace.lit_buf[..workspace.lit_len],
@@ -673,7 +673,7 @@ fn encode_compressed_block_raw_impl(
 
     let saved_rep = *rep_offsets;
 
-    pack_sequences_and_literals(src, sequences, rep_offsets, workspace);
+    pack_sequences_and_literals::<false>(src, sequences, rep_offsets, workspace);
 
     workspace.lit_section.clear();
     encode_raw_literals_header(workspace.lit_len, &mut workspace.lit_section);
@@ -700,13 +700,15 @@ fn encode_compressed_block_raw_impl(
     output.extend_from_slice(&workspace.pred_seq)
 }
 
-fn pack_sequences_and_literals(
+/// Packs `sequences` for the entropy coders and gathers their literals. With
+/// `COUNT`, also counts the codes for custom tables.
+fn pack_sequences_and_literals<const COUNT: bool>(
     src: &[u8],
     sequences: &[Sequence],
     rep_offsets: &mut [u32; 3],
     workspace: &mut BlockEncodeWorkspace,
 ) {
-    simd_body!(pack_sequences_and_literals_impl(
+    simd_body!(pack_sequences_and_literals_impl::<COUNT>(
         src,
         sequences,
         rep_offsets,
@@ -715,7 +717,7 @@ fn pack_sequences_and_literals(
 }
 
 #[inline(always)]
-fn pack_sequences_and_literals_impl(
+fn pack_sequences_and_literals_impl<const COUNT: bool>(
     src: &[u8],
     sequences: &[Sequence],
     rep_offsets: &mut [u32; 3],
@@ -730,11 +732,15 @@ fn pack_sequences_and_literals_impl(
     if workspace.packed_seqs.len() < n {
         workspace.packed_seqs.resize(n, PackedSeq::default());
     }
-    let lit_buf = &mut workspace.lit_buf[..];
+    // The exact length lets the compiler check literal stores at positions
+    // clamped to `src_len` against nothing.
+    let lit_buf = &mut workspace.lit_buf[..src_len + 32];
     let freqs = &mut workspace.seq_freqs;
-    freqs.ll.fill(0);
-    freqs.ml.fill(0);
-    freqs.of.fill(0);
+    if COUNT {
+        freqs.ll.fill(0);
+        freqs.ml.fill(0);
+        freqs.of.fill(0);
+    }
     let mut extra_bits_total = 0u64;
     let mut lit_pos = 0usize;
     let mut lit_offset = 0usize;
@@ -746,10 +752,10 @@ fn pack_sequences_and_literals_impl(
     for (seq, packed) in sequences.iter().zip(&mut workspace.packed_seqs[..n]) {
         let ll = seq.literal_length as usize;
         debug_assert!(lit_offset + ll <= src_len);
-        if ll <= 16 && lit_offset + 16 <= src_len {
-            let s16: &[u8; 16] = src[lit_offset..].first_chunk().unwrap();
-            let d16: &mut [u8; 16] = lit_buf[lit_pos..].first_chunk_mut().unwrap();
-            *d16 = *s16;
+        if ll <= 32 && lit_offset + 32 <= src_len {
+            let s32: &[u8; 32] = src[lit_offset..].first_chunk().unwrap();
+            let d32: &mut [u8; 32] = lit_buf[lit_pos.min(src_len)..].first_chunk_mut().unwrap();
+            *d32 = *s32;
         } else {
             lit_buf[lit_pos..lit_pos + ll].copy_from_slice(&src[lit_offset..lit_offset + ll]);
         }
@@ -785,24 +791,21 @@ fn pack_sequences_and_literals_impl(
         }
         rep0 = off;
 
-        let ll_c = ll_code(seq.literal_length);
-        let ml_c = ml_code(seq.match_length);
+        let (ll_c, ll_nb, ll_extra) = ll_split(seq.literal_length);
+        let (ml_c, ml_nb, ml_extra) = ml_split(seq.match_length);
         let of_c = of_code(ov);
-
-        let ll_nb = LL_BITS_TABLE[ll_c as usize];
-        let ml_nb = ML_BITS_TABLE[ml_c as usize];
-        let ll_extra = seq.literal_length - LL_BASELINE_TABLE[ll_c as usize];
-        let ml_extra = seq.match_length - ML_BASELINE_TABLE[ml_c as usize];
         let of_extra = ov - (1u32 << of_c);
         let extra_bits = (ll_extra as u64)
             | ((ml_extra as u64) << ll_nb)
             | ((of_extra as u64) << (ll_nb + ml_nb));
-        let extra_nbits = ll_nb + ml_nb + of_c;
+        let extra_nbits = (ll_nb + ml_nb) as u8 + of_c;
 
-        freqs.ll[usize::from(ll_c) & 63] += 1;
-        freqs.ml[usize::from(ml_c) & 63] += 1;
-        freqs.of[usize::from(of_c) & 63] += 1;
-        extra_bits_total += u64::from(extra_nbits);
+        if COUNT {
+            freqs.ll[usize::from(ll_c)] += 1;
+            freqs.ml[usize::from(ml_c)] += 1;
+            freqs.of[usize::from(of_c)] += 1;
+            extra_bits_total += u64::from(extra_nbits);
+        }
 
         *packed = PackedSeq {
             extra_bits,
@@ -1783,24 +1786,15 @@ fn optimal_table_log(max_log: u8, num_seq: usize, max_symbol: usize) -> u8 {
 }
 
 #[rustfmt::skip]
-static LL_CODE_TABLE: [u8; 64] = [
+const LL_CODE_TABLE: [u8; 64] = [
      0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
     16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 20, 20, 21, 21, 21, 21,
     22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23,
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
 ];
 
-#[inline]
-fn ll_code(ll: u32) -> u8 {
-    if ll < 64 {
-        return LL_CODE_TABLE[ll as usize];
-    }
-    let high_bit = 31 - ll.leading_zeros();
-    high_bit as u8 + 19
-}
-
 #[rustfmt::skip]
-static ML_CODE_TABLE: [u8; 128] = [
+const ML_CODE_TABLE: [u8; 128] = [
     // mlBase = matchLength - 3, indexed 0..127
      0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
@@ -1813,18 +1807,62 @@ static ML_CODE_TABLE: [u8; 128] = [
 ];
 
 #[inline]
-fn ml_code(ml: u32) -> u8 {
-    let ml_base = ml - 3;
-    if ml_base < 128 {
-        return ML_CODE_TABLE[ml_base as usize];
-    }
-    let high_bit = 31 - ml_base.leading_zeros();
-    high_bit as u8 + 36
-}
-
-#[inline]
 fn of_code(offset_value: u32) -> u8 {
     (31 - offset_value.leading_zeros()) as u8
+}
+
+/// Rows `code | extra_bits << 8 | baseline << 16` for each index of a code
+/// table. Each code covers a run of indices whose length is a power of two,
+/// so the run gives the baseline and the extra-bit count.
+const fn code_rows<const N: usize>(codes: &[u8; N]) -> [u32; N] {
+    let mut rows = [0u32; N];
+    let mut i = 0;
+    while i < N {
+        let code = codes[i];
+        let mut first = i;
+        while first > 0 && codes[first - 1] == code {
+            first -= 1;
+        }
+        let mut end = i;
+        while end < N && codes[end] == code {
+            end += 1;
+        }
+        let nb = (end - first).trailing_zeros();
+        rows[i] = code as u32 | nb << 8 | (first as u32) << 16;
+        i += 1;
+    }
+    rows
+}
+
+/// [`code_rows`] of literal lengths below 64.
+const LL_ROWS: [u32; 64] = code_rows(&LL_CODE_TABLE);
+/// [`code_rows`] of match lengths less 3, below 128.
+const ML_ROWS: [u32; 128] = code_rows(&ML_CODE_TABLE);
+
+/// A literal length's code, extra-bit count and extra bits. One row lookup
+/// replaces the code, bit-count and baseline tables.
+#[inline(always)]
+fn ll_split(ll: u32) -> (u8, u32, u32) {
+    if ll < 64 {
+        let row = LL_ROWS[ll as usize];
+        (row as u8, (row >> 8) & 0xFF, ll - (row >> 16))
+    } else {
+        let high_bit = 31 - ll.leading_zeros();
+        (high_bit as u8 + 19, high_bit, ll - (1 << high_bit))
+    }
+}
+
+/// A match length's code, extra-bit count and extra bits, as [`ll_split`].
+#[inline(always)]
+fn ml_split(ml: u32) -> (u8, u32, u32) {
+    let ml_base = ml - 3;
+    if ml_base < 128 {
+        let row = ML_ROWS[ml_base as usize];
+        (row as u8, (row >> 8) & 0xFF, ml_base - (row >> 16))
+    } else {
+        let high_bit = 31 - ml_base.leading_zeros();
+        (high_bit as u8 + 36, high_bit, ml_base - (1 << high_bit))
+    }
 }
 
 #[cfg(test)]
@@ -1978,18 +2016,24 @@ mod tests {
 
     #[test]
     fn sequence_codes_follow_the_zstd_tables() {
-        for ll in 0..16 {
-            assert_eq!(ll_code(ll), ll as u8);
+        use zrip_core::fse::{LL_BASELINE_TABLE, LL_BITS_TABLE, ML_BASELINE_TABLE, ML_BITS_TABLE};
+        for ll in 0..(1 << 17) {
+            let (code, nb, extra) = ll_split(ll);
+            let c = usize::from(code);
+            assert_eq!(nb, u32::from(LL_BITS_TABLE[c]), "ll {ll}");
+            assert_eq!(extra, ll - LL_BASELINE_TABLE[c], "ll {ll}");
+            assert!(extra < 1 << nb, "ll {ll}");
         }
-        assert_eq!(ll_code(16), 16);
-        assert_eq!(ll_code(63), 24);
-        assert_eq!(ll_code(64), 25);
-        assert_eq!(ll_code(65_535), 34);
-        for ml in 3..35 {
-            assert_eq!(ml_code(ml), (ml - 3) as u8);
+        for ml in 3..(1 << 17) {
+            let (code, nb, extra) = ml_split(ml);
+            let c = usize::from(code);
+            assert_eq!(nb, u32::from(ML_BITS_TABLE[c]), "ml {ml}");
+            assert_eq!(extra, ml - ML_BASELINE_TABLE[c], "ml {ml}");
+            assert!(extra < 1 << nb, "ml {ml}");
         }
-        assert_eq!(ml_code(35), 32);
-        assert_eq!(ml_code(131), 43);
+        assert_eq!(ll_split(63).0, 24);
+        assert_eq!(ll_split(64).0, 25);
+        assert_eq!(ml_split(131).0, 43);
         assert_eq!(of_code(1), 0);
         assert_eq!(of_code(4), 2);
         assert_eq!(of_code(1 << 20), 20);

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Enforce `#![forbid(unsafe_code)]` for every build. The `paranoid` feature
+  remains available and has no effect today.
+- Faster Huffman decoding, including two-symbol tables for dense literal
+  sections, and safe bitstream and XXH64 primitives.
+- Add `ReverseBitReader::is_exhausted` to distinguish an exactly consumed
+  stream from one read past its end.
+
 ## [0.11.0] - 2026-09-25
 
 - Length-limit Huffman codes to `MAX_BITS` instead of returning `None` for

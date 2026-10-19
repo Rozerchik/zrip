@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Enforce `#![forbid(unsafe_code)]` for every build. The `paranoid` feature
+  remains available and has no effect today.
+- Faster match finding and block encoding, with reused sequence buffers
+  and less work on incompressible input.
+- Retune levels: L-7 uses raw literals and long matches for fast encoding
+  and decoding; L-8 now runs as L-7. L-6 to L-4 encode faster. L3 and L4
+  use a match finder modeled on C zstd's for better speed and ratios.
+
 ## [0.9.0] - 2026-09-25
 
 - Add `CompressContext::compress_into` for caller-owned output slices.

@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const ZRIP_LEVELS: &[i32] = &[-8, -7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
+const ZRIP_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
 const C_ZSTD_LEVELS: &[i32] = &[-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4];
 
 #[derive(Clone, Copy)]
@@ -511,7 +511,7 @@ fn bench_decode_only(
                 decompressor.decompress_to_buffer(f, &mut buf).unwrap()
             })
         }
-        "zrip" | "zrip paranoid" => {
+        "zrip" => {
             let mut ctx = zrip::DecompressContext::new();
             run(frames, slices, target_ns, |f, _| {
                 ctx.decompress(f).unwrap().len()
@@ -882,9 +882,6 @@ fn migrate_flat_cache() {
     }
 }
 
-#[cfg(feature = "paranoid")]
-const ZRIP_CODEC: &str = "zrip paranoid";
-#[cfg(not(feature = "paranoid"))]
 const ZRIP_CODEC: &str = "zrip";
 
 const CODECS: &[&str] = &["C zstd", ZRIP_CODEC, "ruzstd", "structured-zstd", "lz4rip"];
@@ -895,7 +892,7 @@ fn levels_for_codec<'a>(codec: &str, level_filter: &'a [i32]) -> &'a [i32] {
     match codec {
         "ruzstd" | "lz4rip" => &[1],
         _ if !level_filter.is_empty() => level_filter,
-        "zrip" | "zrip paranoid" | "zrip+dict" => ZRIP_LEVELS,
+        "zrip" | "zrip+dict" => ZRIP_LEVELS,
         "C zstd" | "C zstd+dict" | "structured-zstd" => C_ZSTD_LEVELS,
         _ => &[1],
     }
@@ -913,7 +910,6 @@ fn fmt_mbs(input_size: usize, ns: f64) -> String {
 fn display_codec(codec: &str) -> &str {
     match codec {
         "structured-zstd" => "s-zstd",
-        "zrip paranoid" => "paranoid",
         "C zstd+dict" => "Czstd+d",
         "zrip+dict" => "zrip+d",
         other => other,
@@ -1258,7 +1254,7 @@ fn main() {
 
                     let mut r = match codec {
                         "C zstd" => bench_c_zstd(slices, name, level, target_ns),
-                        "zrip" | "zrip paranoid" => bench_zrip(slices, name, level, target_ns),
+                        "zrip" => bench_zrip(slices, name, level, target_ns),
                         "ruzstd" => bench_ruzstd(slices, name, level, target_ns),
                         "structured-zstd" => bench_structured_zstd(slices, name, level, target_ns),
                         "lz4rip" => bench_lz4rip(slices, name, level, target_ns),

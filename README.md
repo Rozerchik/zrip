@@ -1,7 +1,7 @@
 # zrip
 
 Pure Rust zstd codec. The decoder reads standard zstd blocks and frames
-produced at any zstd compression level. The encoder supports levels -8 through
+produced at any zstd compression level. The encoder supports levels -7 through
 4 for fast transfer pipelines. First-class dictionary support.
 
 ## Why zrip
@@ -10,13 +10,12 @@ produced at any zstd compression level. The encoder supports levels -8 through
 zstd implementations on both encode and decode across all supported levels.
 See the [benchmarks below](#performance).
 
-**Negative levels (-8 through -1).** Unlocks zstd's fastest compression tiers,
-useful when throughput matters more than ratio. L-8 is zrip's own addition
-beyond C zstd's range: a faster L-7 that skips ahead more aggressively where
-it finds no matches.
+**Negative levels (-7 through -1).** Unlocks zstd's fastest compression tiers,
+useful when throughput matters more than ratio. L-7 is tuned for LZ4's niche:
+raw literals and only matches of eight bytes or more, at a ratio close to
+LZ4's.
 
-**Memory safety.** Unsafe is minimized and confined to small, auditable
-primitives modules. The `paranoid` feature eliminates all remaining unsafe.
+**Memory safety.** No `unsafe`: every crate is `#![forbid(unsafe_code)]`.
 See [SAFETY.md](SAFETY.md).
 
 **Small codebase.** ~13k Rust SLOC. Levels above 4 add
@@ -189,16 +188,15 @@ let dict = train_dict_fastcover(&samples, 16384, FastCoverParams::default());
 | `ldm`          | yes     | Long distance matching for large-window compression |
 | `dict_builder` | no      | COVER/FastCOVER dictionary training            |
 | `simd`         | yes     | `fearless_simd` runtime dispatch (AVX2+BMI2, NEON, SIMD128) |
-| `paranoid`     | no      | Pure safe Rust: `forbid(unsafe_code)` on all crates    |
+| `paranoid`     | no      | Keeps any future `unsafe` out; no effect today  |
 | `nightly`      | no      | `#[optimize]` attributes on hot functions      |
 
 ## Safety
 
-[SAFETY.md](SAFETY.md) documents the unsafe boundary and catalogs C zstd
-memory safety bugs that Rust prevents by construction.
+[SAFETY.md](SAFETY.md) describes how zrip stays fast without `unsafe` and
+catalogs C zstd memory safety bugs that Rust prevents by construction.
 
-All codec paths are fuzz-tested (16 targets, ~10.7M executions) and verified
-under Miri on both x86_64 and aarch64. Fuzz targets cover round-trip
+All codec paths are fuzz-tested (17 targets). Fuzz targets cover round-trip
 correctness, cross-validation against C zstd, streaming, dictionary modes,
 and corruption resistance (bitflip, splice, truncate, overwrite).
 
@@ -216,8 +214,11 @@ work for better ratios while staying in the Fast/DFast range.
 
 Level 0 maps to the library default, currently level 1.
 
-L-8 is zrip-specific. It is L-7 with a larger match-search step and faster
-skip acceleration: it encodes faster than L-7 at a slightly lower ratio.
+L-7 aims at LZ4's niche. It keeps literals raw, as C zstd does at negative
+levels, and takes only matches of eight bytes or more, so its frames hold few
+sequences and no Huffman tables. On the Silesia corpus it compresses within 2%
+of LZ4 (1.90 against 1.94), encodes 16% faster than L-6 and decodes 1.6x as
+fast. Level -8, a separate zrip level in earlier versions, runs as L-7.
 
 The decoder is level-independent and supports standard zstd frames produced
 by all zstd compression levels. See [DESIGN.md](DESIGN.md) for exact encoder

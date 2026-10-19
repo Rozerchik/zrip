@@ -2,7 +2,7 @@
  * @module
  *
  * Pure Rust zstd codec compiled to WebAssembly. Decodes standard zstd blocks
- * and frames produced at any compression level. Encodes levels -8 through 4
+ * and frames produced at any compression level. Encodes levels -7 through 4
  * for fast transfer pipelines. First-class dictionary support.
  *
  * Automatically detects WASM SIMD support and loads the appropriate binary.
@@ -258,13 +258,14 @@ export function initSyncFromBytes(bytes: BufferSource): void {
  * Compress data at the given zstd level. Returns a standard zstd frame.
  *
  * @param input The data to compress.
- * @param level Compression level from -8 (fastest) to 4 (best ratio). Default: 1.
+ * @param level Compression level from -7 (fastest) to 4 (best ratio); -8 runs
+ *   as -7. Default: 1.
  * @returns Compressed zstd frame as a `Uint8Array`.
  *
  * @example
  * ```ts
  * const compressed = compress(data);           // level 1
- * const fast = compress(data, -8);             // fastest
+ * const fast = compress(data, -7);             // fastest
  * const best = compress(data, 4);              // best ratio
  * ```
  */
@@ -301,7 +302,7 @@ export function compressBound(inputLen: number): number {
  * share common structure.
  *
  * @param input The data to compress.
- * @param level Compression level from -8 to 4.
+ * @param level Compression level from -7 to 4.
  * @param dict A {@linkcode Dictionary} instance.
  * @returns Compressed zstd frame as a `Uint8Array`.
  */

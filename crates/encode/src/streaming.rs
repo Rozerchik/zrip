@@ -67,7 +67,7 @@ pub struct FrameEncoder<W: Write> {
 }
 
 impl<W: Write> FrameEncoder<W> {
-    /// Creates a new streaming encoder at the given level (-8..=4).
+    /// Creates a new streaming encoder at the given level (-7..=4; -8 runs as -7).
     pub fn new(writer: W, level: i32) -> Result<Self, CompressError> {
         let params = strategy::level_params(level).ok_or(CompressError::InvalidLevel(level))?;
         Self::from_params(writer, params, None)
@@ -85,7 +85,7 @@ impl<W: Write> FrameEncoder<W> {
         Self::from_params(writer, params, None)
     }
 
-    /// Creates a new streaming encoder with a dictionary at the given level (-8..=4).
+    /// Creates a new streaming encoder with a dictionary at the given level (-7..=4; -8 runs as -7).
     pub fn with_dict(writer: W, level: i32, dict: Dictionary) -> Result<Self, CompressError> {
         let params = strategy::level_params(level).ok_or(CompressError::InvalidLevel(level))?;
         Self::from_params(writer, params, Some(dict))
