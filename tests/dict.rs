@@ -595,3 +595,62 @@ fn frame_decoder_dict_repeated_identical_frames() {
     decoder.read_to_end(&mut output).unwrap();
     assert_eq!(output, data.repeat(3));
 }
+
+/// JSON events with recurring keys and varying values, `len` bytes long.
+#[cfg(feature = "dict_builder")]
+fn events(seed: u32, len: usize) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut state = seed.max(1);
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    let mut out = String::from("[");
+    while out.len() < len {
+        let (id, px, qty, ts) = (next(), next() % 100_000, next() % 1000, next());
+        let sym = ["AAPL", "MSFT", "NVDA", "AMZN"][(id % 4) as usize];
+        write!(
+            out,
+            r#"{{"id":{id},"sym":"{sym}","side":"buy","px":{}.{:02},"qty":{qty},"ts":{ts}}},"#,
+            px / 100,
+            px % 100
+        )
+        .unwrap();
+    }
+    out.truncate(len);
+    out.into_bytes()
+}
+
+/// Each input size takes another dictionary path: attached below 8 KiB, the
+/// prefilled snapshot or attached by parameter tier above, and multi-block
+/// prefix compression past 128 KiB.
+#[cfg(feature = "dict_builder")]
+#[test]
+fn dict_frames_never_lose_to_plain_frames_on_similar_records() {
+    let samples: Vec<Vec<u8>> = (0..64).map(|i| events(7 + i, 512)).collect();
+    let sample_refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+    let dict = zrip::dict::train_dict_fastcover(
+        &sample_refs,
+        2048,
+        zrip::dict::fastcover::FastCoverParams::default(),
+    );
+
+    for level in [-7, -5, -3, -1, 1, 2, 3, 4] {
+        let mut plain = zrip::CompressContext::new(level).unwrap();
+        let mut with = zrip::CompressContext::with_dict(level, dict.clone()).unwrap();
+        for len in [300, 1024, 4096, 8192, 8193, 16384, 16385, 40_000, 200_000] {
+            let input = events(1000 + len as u32, len);
+            let without = plain.compress(&input).unwrap().len();
+            let frame = with.compress(&input).unwrap().into_owned();
+            assert_eq!(zrip::decompress_with_dict(&frame, &dict).unwrap(), input);
+            assert!(
+                frame.len() <= without,
+                "L{level} {len} B: dict frame {} B, plain frame {without} B",
+                frame.len()
+            );
+        }
+    }
+}

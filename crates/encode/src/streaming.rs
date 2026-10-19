@@ -230,6 +230,7 @@ impl<W: Write> FrameEncoder<W> {
                             &self.window_buf,
                             plen,
                             self.params.hash_log,
+                            self.params.min_match,
                             &mut self.hash_table,
                         );
                     }
