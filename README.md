@@ -6,31 +6,17 @@ produced at any zstd compression level. The encoder supports levels -7 through
 
 ## Why zrip
 
-**Fastest pure-Rust zstd encoder.** Consistently outperforms other pure-Rust
-zstd implementations on both encode and decode across all supported levels.
-See the [benchmarks below](#performance).
-
-**Negative levels (-7 through -1).** Unlocks zstd's fastest compression tiers,
-useful when throughput matters more than ratio. L-7 is tuned for LZ4's niche:
-raw literals and only matches of eight bytes or more, at a ratio close to
-LZ4's.
-
-**Memory safety.** No `unsafe`: every crate is `#![forbid(unsafe_code)]`.
-See [SAFETY.md](SAFETY.md).
-
-**Small codebase.** ~13k Rust SLOC. Levels above 4 add
-complexity for compression ratios that only matter in archival storage, not
-transfer pipelines.
-
-**Dictionary compression.** COVER and FastCOVER training built in for
-small-message workloads (log lines, JSON records, RPC payloads).
-
-**`no_std` + `alloc`.** Works in embedded and kernel contexts with the `alloc`
-feature; `frame` requires `std`.
-
-**WebAssembly.** Available as [`@paddor/zrip`](https://jsr.io/@paddor/zrip)
-on JSR and npm. Auto-detects WASM SIMD support. 15% faster encode than C zstd
-compiled to WASM.
+- **Speed.** Built for throughput. [Performance](#performance) compares it
+  with C zstd and other Rust implementations.
+- **Negative levels.** Levels -7 to -1 trade ratio for speed, as in C zstd.
+- **No `unsafe`.** Every crate is `#![forbid(unsafe_code)]`. See
+  [SAFETY.md](SAFETY.md).
+- **Small.** About 15k lines of Rust. No levels above 4; their extra ratio
+  matters for storage, not transfers.
+- **Dictionaries.** Built-in COVER and FastCOVER training.
+- **`no_std` + `alloc`.** The `frame` feature needs `std`.
+- **WebAssembly.** [`@paddor/zrip`](https://jsr.io/@paddor/zrip) on JSR and
+  npm, with WASM SIMD detection.
 
 ## Performance
 
@@ -208,23 +194,10 @@ from C zstd.
 
 ## Levels
 
-zrip's encoder covers the fast end of the zstd speed/ratio curve. Negative
-levels favor throughput over ratio. Positive levels spend more match-finding
-work for better ratios while staying in the Fast/DFast range.
-
-Level 0 maps to the library default, currently level 1.
-
-L-7 aims at LZ4's niche. It keeps literals raw, as C zstd does at negative
-levels, and takes only matches of eight bytes or more, so its frames hold few
-sequences and no Huffman tables. On the Silesia corpus it compresses within 2%
-of LZ4 (1.90 against 1.94), encodes 16% faster than L-6 and decodes 1.6x as
-fast. Level -8, a separate zrip level in earlier versions, runs as L-7.
+Level 0 means the default, level 1. [DESIGN.md](DESIGN.md) lists each
+level's parameters.
 
 `zrip::adaptive::AdaptiveLevel` picks the level at run time. The caller reports
 each window's compression work and what limited it: output, CPU, or idle input.
-It steps toward ratio or speed, settles on the best measured level, and the
-caller applies it with `CompressContext::set_level()`.
-
-The decoder is level-independent and supports standard zstd frames produced
-by all zstd compression levels. See [DESIGN.md](DESIGN.md) for exact encoder
-level parameters and pipeline behavior.
+It settles on the best measured level, which the caller applies with
+`CompressContext::set_level()`.
