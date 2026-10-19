@@ -21,15 +21,15 @@ const bounded = decompress(compressed, { maxDecompressedSize: data.length });
 
 ### Compression levels
 
-|  Level | Strategy | Notes                                |
-| -----: | :------- | :----------------------------------- |
-|     -7 | Fast     | Fastest, raw literals; -8 runs as -7 |
-| -6..-1 | Fast     |                                      |
-|      0 |          | Alias for level 1                    |
-|      1 | Fast     | Default                              |
-|      2 | Fast     |                                      |
-|      3 | DFast    | Dual hash tables                     |
-|      4 | DFast    | Best ratio                           |
+|  Level | Strategy | Notes                                  |
+| -----: | :------- | :------------------------------------- |
+|     -7 | Fast     | Fastest; raw literals and long matches |
+| -6..-1 | Fast     | Fast encoding with Huffman literals    |
+|      0 |          | Alias for level 1                      |
+|      1 | Fast     | Default                                |
+|      2 | Fast     |                                        |
+|      3 | DFast    | Dual hash tables                       |
+|      4 | DFast    | Best ratio                             |
 
 ### Reusable contexts
 
@@ -99,15 +99,19 @@ const compressed = compress(data);
 
 ## Performance
 
-WASM benchmark at level 1 (geomean across Silesia corpus, 4 MiB cap per file):
+Level 1 benchmark through the JavaScript API, using the first 4 MiB of each of
+the 12 Silesia files. Geometric mean, decimal MB/s. Measured on 2026-10-19 with
+Deno 2.8.3, SIMD128, and an Intel Core i7-8700B Linux VM.
 
-| Impl                | Encode MB/s | Decode MB/s |
-| :------------------ | ----------: | ----------: |
-| zrip                |   **153.6** |   **306.1** |
-| C zstd (zstd-codec) |       133.7 |       269.5 |
+| Impl                      | Encode MB/s | Decode MB/s |
+| :------------------------ | ----------: | ----------: |
+| zrip                      |   **148.0** |   **384.2** |
+| C zstd (zstd-codec 0.1.5) |       129.8 |       270.5 |
 
-zrip WASM is 15% faster encode, 14% faster decode than C zstd compiled to WASM
-via Emscripten.
+Run `deno run --allow-read src/bench.ts` from `jsr/` after building the WASM
+package to reproduce this comparison. The
+[WASI charts](https://github.com/paddor/zrip#performance) measure full files in
+wasmtime.
 
 ## Source
 

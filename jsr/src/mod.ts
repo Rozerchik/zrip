@@ -258,8 +258,7 @@ export function initSyncFromBytes(bytes: BufferSource): void {
  * Compress data at the given zstd level. Returns a standard zstd frame.
  *
  * @param input The data to compress.
- * @param level Compression level from -7 (fastest) to 4 (best ratio); -8 runs
- *   as -7. Default: 1.
+ * @param level Compression level from -7 (fastest) to 4 (best ratio). Default: 1.
  * @returns Compressed zstd frame as a `Uint8Array`.
  *
  * @example

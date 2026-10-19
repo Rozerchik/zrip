@@ -211,10 +211,10 @@ impl Config {
                 Some("wasmtime (wasm32-wasip1), Linux VM on Intel Core i7-8700B @ 3.20GHz".into());
             cfg.codecs = vec![
                 codec("C zstd", "C zstd 1.5.7 (libzstd wasm)", 0x60a5fa, 0x4680c4),
-                codec("zrip", "zrip (SIMD128)", 0xf87171, 0xc45050),
+                codec("zrip", "zrip (safe Rust, SIMD128)", 0xf87171, 0xc45050),
                 codec(
                     "structured-zstd",
-                    "structured-zstd 0.0.49",
+                    "structured-zstd 0.0.48",
                     0xf59e0b,
                     0xc47d08,
                 ),
@@ -1229,13 +1229,13 @@ fn draw_summary(cfg: &Config, out_dir: &Path) -> Result<(), Box<dyn Error>> {
     let height = 63 + 250 + 52 + (leg_rows as f64 * LEGEND_ROW_H) as u32 + 58;
     let path = output_path(out_dir, "summary.svg");
     let area = root(&path, width, height)?;
-    chart_header(
-        &area,
-        width,
-        "12-file Silesia: Pipeline @100 MB/s geomean, L-7..L4 (ruzstd L1)",
-        cfg.hw_label.as_deref(),
-        22,
-    )?;
+    let level_note = if codecs.contains(&"ruzstd") {
+        " (ruzstd L1)"
+    } else {
+        ""
+    };
+    let title = format!("12-file Silesia: Pipeline @100 MB/s geomean, L-7..L4{level_note}");
+    chart_header(&area, width, &title, cfg.hw_label.as_deref(), 22)?;
 
     let x_left = 70.0;
     let x_right = 680.0;

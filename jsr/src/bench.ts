@@ -1,4 +1,4 @@
-import { init, compress, decompress } from "./mod.ts";
+import { compress, decompress, init } from "./mod.ts";
 import { ZstdCodec } from "npm:zstd-codec";
 
 function bench(
@@ -44,8 +44,8 @@ const FILES = [
 ];
 
 function fmtSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
-  return (bytes / 1024).toFixed(0) + " KB";
+  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MiB";
+  return (bytes / 1024).toFixed(0) + " KiB";
 }
 
 async function main() {
@@ -69,7 +69,9 @@ async function main() {
   for (const file of FILES) {
     const path = `${CORPUS_DIR}/${file}`;
     const full = await Deno.readFile(path);
-    const data = full.length > 4 * 1024 * 1024 ? full.slice(0, 4 * 1024 * 1024) : full;
+    const data = full.length > 4 * 1024 * 1024
+      ? full.slice(0, 4 * 1024 * 1024)
+      : full;
     const name = file.replace("silesia/", "");
     sizes.push(data.length);
 
@@ -89,7 +91,7 @@ async function main() {
     const warmup = Math.max(2, Math.floor(iters / 4));
 
     const mbps = (bytes: number, ms: number) =>
-      (bytes / 1024 / 1024) / (ms / 1000);
+      (bytes / 1_000_000) / (ms / 1000);
 
     const zripEncMs = bench(() => compress(data, level), warmup, iters);
     const zripDecMs = bench(() => decompress(zripCompressed), warmup, iters);
@@ -106,7 +108,11 @@ async function main() {
 
     if (czstdCompressed) {
       const czstdRatio = czstdCompressed.length / data.length;
-      const czstdEncMs = bench(() => czstd.compress(data, level), warmup, iters);
+      const czstdEncMs = bench(
+        () => czstd.compress(data, level),
+        warmup,
+        iters,
+      );
       const czstdDecMs = bench(
         () => czstd.decompress(czstdCompressed!),
         warmup,
@@ -139,12 +145,16 @@ async function main() {
   console.log(
     `${"GEOMEAN".padEnd(22)} ${"".padStart(9)}  ` +
       `${"zrip".padEnd(10)} ${"".padStart(6)} ` +
-      `${geomean(zripEncs).toFixed(1).padStart(10)} ${geomean(zripDecs).toFixed(1).padStart(10)}`,
+      `${geomean(zripEncs).toFixed(1).padStart(10)} ${
+        geomean(zripDecs).toFixed(1).padStart(10)
+      }`,
   );
   console.log(
     `${"".padEnd(22)} ${"".padStart(9)}  ` +
       `${"C zstd".padEnd(10)} ${"".padStart(6)} ` +
-      `${geomean(czstdEncs).toFixed(1).padStart(10)} ${geomean(czstdDecs).toFixed(1).padStart(10)}`,
+      `${geomean(czstdEncs).toFixed(1).padStart(10)} ${
+        geomean(czstdDecs).toFixed(1).padStart(10)
+      }`,
   );
 }
 

@@ -194,6 +194,55 @@ cargo run --manifest-path bench/Cargo.toml --example zrip_bench --release -- \
   --levels -1,1,3
 ```
 
+### WebAssembly benchmarks
+
+The JSR benchmark measures the JavaScript API in Deno, including WASM memory
+copies. It compares level 1 against `zstd-codec`, using the first 4 MiB of
+each Silesia file. Throughput uses decimal MB/s:
+
+```bash
+cd jsr
+bash build.sh
+deno run --allow-read src/bench.ts
+```
+
+The WASI benchmark measures full Silesia files in wasmtime at levels -7
+through 4. Override the repository's native CPU flags when building it:
+
+```bash
+RUSTFLAGS="-C target-feature=+simd128" cargo build \
+  --manifest-path bench/wasm/Cargo.toml --target wasm32-wasip1 --release
+wasmtime run \
+  "${CARGO_TARGET_DIR:-bench/wasm/target}/wasm32-wasip1/release/zrip-bench-wasm.wasm" \
+  --impl zrip --label dickens --json < bench/corpus/silesia/dickens
+```
+
+Run each of the 12 Silesia inputs serially. Append each JSON row to
+`~/.cache/zrip/wasm32/L<level>/<codec>.jsonl`, replacing spaces in codec names
+with underscores. Preserve existing cache history.
+
+When refreshing the external baselines, set `WASI_SDK_PATH` to an installed
+WASI SDK and build the additional codecs:
+
+```bash
+CC_wasm32_wasip1="$WASI_SDK_PATH/bin/clang" \
+AR_wasm32_wasip1="$WASI_SDK_PATH/bin/llvm-ar" \
+CFLAGS_wasm32_wasip1="-O3 -msimd128" \
+RUSTFLAGS="-C target-feature=+simd128" \
+cargo build --manifest-path bench/wasm/Cargo.toml --target wasm32-wasip1 \
+  --release --features czstd,structured-zstd
+```
+
+Run that binary with `--impl all` for a baseline refresh. After appending
+the measurements, regenerate the corpus charts:
+
+```bash
+for chart in scatter summary matrix pipeline; do
+  cargo run --manifest-path bench/Cargo.toml --bin zrip_charts -- \
+    "$chart" --profile wasm32
+done
+```
+
 ## Charts
 
 Rust chart generation lives in the `bench` crate and reads
