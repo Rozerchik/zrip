@@ -33,6 +33,7 @@ macro_rules! simd_body {
     };
 }
 
+pub mod adaptive;
 pub(crate) mod block_encoder;
 #[cfg(feature = "std")]
 pub mod context;

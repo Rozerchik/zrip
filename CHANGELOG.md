@@ -4,6 +4,9 @@
 
 ### Added
 
+- `zrip::adaptive::AdaptiveLevel` walks the compression level toward ratio
+  or speed. The caller reports each window's `CompressStats` and what
+  limited it: `Bottleneck::Output`, `Cpu`, or `Input`.
 - `CompressContext::set_level()` and `CompressContext::level()`. A context
   with a dictionary prepares it again for the new level.
 
