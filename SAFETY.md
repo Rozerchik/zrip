@@ -2,32 +2,16 @@
 
 ## No unsafe
 
-All four crates (`zrip`, `zrip-core`, `zrip-encode`, `zrip-decode`) are
-`#![forbid(unsafe_code)]`. SIMD dispatch goes through `fearless_simd`
-(`dispatch!` in the decoder, `simd_body!` in the encoder), which keeps the
-`#[target_feature]` calls inside that crate. No `unsafe` is exposed in the
-public API.
+All four crates are `#![forbid(unsafe_code)]`. SIMD dispatch goes through
+`fearless_simd`, which keeps the `#[target_feature]` calls inside that crate.
 
-The hot loops keep most bounds checks out by construction. Hash tables are
-cut to their exact size, bytes read for hashing are reused for match checks,
-and DFast clamps reads to a limit the compiler can prove in bounds. A clamped
-read never leaves the input, but if a finder invariant broke, it would read
-the wrong bytes instead of panicking; debug builds assert the invariants. The
-decoder zeroes each block's output room, so its chunked copies index an
-initialized slice.
+Hot loops avoid bounds checks by construction: exact-size hash tables, reads
+clamped to limits the compiler can prove, and zeroed decoder output room. A
+broken match finder invariant reads wrong input bytes instead of panicking;
+debug builds assert the invariants.
 
-The `paranoid` feature has no effect today. It stays so existing feature
-lists keep building, and as a guarantee: if a later release adds `unsafe`
-code for speed, builds with `paranoid` leave it out.
-
-## Testing
-
-- **Fuzz** (17 targets): round-trip and corruption targets, 3+ hours each.
-- **Adversarial corpus**: 6500+ small/malformed zstd files from prior fuzzing.
-- **Proptest**: property-based round-trips with random data sizes and levels.
-- **C zstd cross-validation**: compress with C, decompress with zrip and vice versa.
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for commands.
+The `paranoid` feature has no effect today. If a later release adds `unsafe`
+for speed, builds with `paranoid` leave it out.
 
 ## Why Rust matters here
 
