@@ -168,6 +168,9 @@ impl PreparedDict {
 pub struct CompressContext {
     level: i32,
     content_checksum: bool,
+    /// The dictionary and expected input size to prepare it again on a
+    /// level change.
+    dict: Option<(Dictionary, usize)>,
     prepared: Option<PreparedDict>,
     hash_table: Vec<u32>,
     hash_long: Vec<u32>,
@@ -192,6 +195,7 @@ impl CompressContext {
         Ok(Self {
             level,
             content_checksum: true,
+            dict: None,
             prepared: None,
             hash_table,
             hash_long,
@@ -237,6 +241,7 @@ impl CompressContext {
         Ok(Self {
             level,
             content_checksum: true,
+            dict: Some((dict, expected_size)),
             prepared: Some(prepared),
             hash_table,
             hash_long,
@@ -247,6 +252,30 @@ impl CompressContext {
             workspace: BlockEncodeWorkspace::new(),
             combined: Vec::new(),
         })
+    }
+
+    /// The level of the next frame.
+    pub const fn level(&self) -> i32 {
+        self.level
+    }
+
+    /// Switches later frames to `level` (-7..=4; -8 runs as -7).
+    ///
+    /// Hash tables and buffers stay allocated and resize on use. A context
+    /// with a dictionary prepares the dictionary again for the new level.
+    pub fn set_level(&mut self, level: i32) -> Result<(), CompressError> {
+        if level == self.level {
+            return Ok(());
+        }
+        strategy::level_params(level).ok_or(CompressError::InvalidLevel(level))?;
+        if let Some((dict, expected_size)) = &self.dict {
+            let total_window = dict.content().len().saturating_add(*expected_size);
+            let params = strategy::level_params_for_size(level, total_window)
+                .expect("level validated above");
+            self.prepared = Some(PreparedDict::new(dict, level, &params));
+        }
+        self.level = level;
+        Ok(())
     }
 
     /// Enables or disables the standard Zstandard frame content checksum.

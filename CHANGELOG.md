@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CompressContext::set_level()` and `CompressContext::level()`. A context
+  with a dictionary prepares it again for the new level.
+
 ### Fixed
 
 - Dictionaries at levels -7 to 2 no longer cost ratio. Inputs up to 16 KiB

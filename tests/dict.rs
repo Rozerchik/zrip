@@ -654,3 +654,31 @@ fn dict_frames_never_lose_to_plain_frames_on_similar_records() {
         }
     }
 }
+
+#[cfg(feature = "dict_builder")]
+#[test]
+fn set_level_prepares_the_dictionary_again() {
+    let samples: Vec<Vec<u8>> = (0..64).map(|i| events(7 + i, 512)).collect();
+    let sample_refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+    let dict = zrip::dict::train_dict_fastcover(
+        &sample_refs,
+        2048,
+        zrip::dict::fastcover::FastCoverParams::default(),
+    );
+
+    let mut ctx = zrip::CompressContext::with_dict(-1, dict.clone()).unwrap();
+    for level in [4, -7, 1, 3, -1] {
+        ctx.set_level(level).unwrap();
+        for len in [300, 8192, 20_000] {
+            let input = events(len as u32, len);
+            let mut fresh = zrip::CompressContext::with_dict(level, dict.clone()).unwrap();
+            let frame = ctx.compress(&input).unwrap().into_owned();
+            assert_eq!(
+                frame,
+                fresh.compress(&input).unwrap().into_owned(),
+                "L{level} {len} B"
+            );
+            assert_eq!(zrip::decompress_with_dict(&frame, &dict).unwrap(), input);
+        }
+    }
+}

@@ -901,3 +901,27 @@ fn decompress_context_recovers_after_a_corrupt_frame() {
         assert_eq!(err, zrip::DecompressError::CorruptLiterals);
     }
 }
+
+#[test]
+fn set_level_matches_a_fresh_context() {
+    let text: Vec<u8> = (0..20_000)
+        .flat_map(|i| format!("line {i} value {}\n", i * 31 % 1000).into_bytes())
+        .collect();
+    let inputs = [&text[..100], &text[..5_000], &text[..70_000], &text[..]];
+    let mut ctx = zrip::CompressContext::new(-1).unwrap();
+    for level in [4, -7, 1, 3, -3, 2, -1] {
+        ctx.set_level(level).unwrap();
+        assert_eq!(ctx.level(), level);
+        for input in inputs {
+            let mut fresh = zrip::CompressContext::new(level).unwrap();
+            assert_eq!(
+                ctx.compress(input).unwrap(),
+                fresh.compress(input).unwrap(),
+                "L{level} {} B",
+                input.len()
+            );
+        }
+    }
+    assert!(ctx.set_level(5).is_err());
+    assert_eq!(ctx.level(), -1);
+}
