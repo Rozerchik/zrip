@@ -22,9 +22,7 @@ code for speed, builds with `paranoid` leave it out.
 
 ## Testing
 
-- **Miri** (Stacked Borrows): full suite with 256 seed variations, plus decode
-  smoke tests and dict-compressed decode (56 fuzz-corpus-derived frames).
-- **Fuzz** (16 targets, ASAN): round-trip and corruption targets, 3+ hours each.
+- **Fuzz** (17 targets): round-trip and corruption targets, 3+ hours each.
 - **Adversarial corpus**: 6500+ small/malformed zstd files from prior fuzzing.
 - **Proptest**: property-based round-trips with random data sizes and levels.
 - **C zstd cross-validation**: compress with C, decompress with zrip and vice versa.

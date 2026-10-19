@@ -115,30 +115,27 @@ cargo +nightly fuzz run zrip_fuzz_roundtrip_frame -- -max_len=65536
 cargo +nightly fuzz run zrip_fuzz_c_compress_zrip_decompress
 ```
 
-## Pre-release Miri + fuzz audit
+## Pre-release fuzz run
 
-Before tagging a release, run the scripted memory audit. It runs:
-
-- full alloc-mode Miri with strict flags and 256 seed variations;
-- Miri decode smoke tests, including the dictionary corpus fixture;
-- every fuzz target under AddressSanitizer, with corrupt targets first.
+Before tagging a release, run every fuzz target, corrupt targets first. The
+code has no `unsafe`, so targets build without a sanitizer. They catch
+panics, hangs, out-of-memory, and round-trip or C zstd mismatches.
 
 For the full release duration, run each fuzz target for 3 hours:
 
 ```bash
-FUZZ_SECONDS_PER_TARGET=10800 scripts/overnight_memory_audit.sh
+FUZZ_SECONDS_PER_TARGET=10800 scripts/overnight_fuzz.sh
 ```
 
 For an overnight pass, the script defaults to 30 minutes per fuzz target.
 Logs, artifacts, and TSV summaries are written under
-`tmp/overnight-memory-audit/$RUN_ID/`.
+`tmp/overnight-fuzz/$RUN_ID/`.
 
 Useful controls:
 
 ```bash
-SMOKE=1 scripts/overnight_memory_audit.sh          # quick harness check
-CPU_COUNT=8 scripts/overnight_memory_audit.sh      # build/fuzz parallelism
-RUN_FULL_MIRI=0 scripts/overnight_memory_audit.sh  # fuzz only
+SMOKE=1 scripts/overnight_fuzz.sh      # quick harness check
+CPU_COUNT=8 scripts/overnight_fuzz.sh  # build/fuzz parallelism
 ```
 
 The dict decode test uses a pre-built fixture

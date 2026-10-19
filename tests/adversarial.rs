@@ -1,9 +1,7 @@
 // Adversarial/corruption tests. All use zrip-only (no C zstd).
 
-#[cfg(not(miri))]
 const KNUTH: u32 = 0x9E37_79B1;
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_garbage_bytes_never_panics() {
     for seed in 0u64..500 {
@@ -20,7 +18,6 @@ fn decompress_garbage_bytes_never_panics() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_valid_frame_with_corrupt_blocks_never_panics() {
     let magic = [0x28, 0xB5, 0x2F, 0xFD];
@@ -41,7 +38,6 @@ fn decompress_valid_frame_with_corrupt_blocks_never_panics() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_bit_flipped_frames_never_panic() {
     let original: Vec<u8> = b"the quick brown fox jumps over the lazy dog "
@@ -61,7 +57,6 @@ fn decompress_bit_flipped_frames_never_panic() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_truncated_at_every_byte_never_panics() {
     let original: Vec<u8> = b"ABCDEFGHIJKLMNOP"
@@ -76,7 +71,6 @@ fn decompress_truncated_at_every_byte_never_panics() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_two_byte_flips_never_panic() {
     let original: Vec<u8> = (0..2000u32)
@@ -96,7 +90,6 @@ fn decompress_two_byte_flips_never_panic() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_zero_filled_after_header_never_panics() {
     let original: Vec<u8> = b"hello world ".iter().cycle().take(4000).copied().collect();
@@ -111,7 +104,6 @@ fn decompress_zero_filled_after_header_never_panics() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_ff_filled_after_header_never_panics() {
     let original: Vec<u8> = b"test data ".iter().cycle().take(4000).copied().collect();
@@ -251,7 +243,6 @@ fn decompress_multiframe_corrupt_never_panics() {
 
 // ===== Sequence/literal corruption =====
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_corrupt_sequence_section_never_panics() {
     let original: Vec<u8> = b"ABCDEFGHIJKLMNOP"
@@ -272,7 +263,6 @@ fn decompress_corrupt_sequence_section_never_panics() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_corrupt_literals_section_never_panics() {
     let original: Vec<u8> = (0..8000u32)
@@ -292,7 +282,6 @@ fn decompress_corrupt_literals_section_never_panics() {
 
 // ===== Near-valid frames =====
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_frame_content_size_mismatch_never_panics() {
     let original = b"test data for fcs mismatch";
@@ -330,12 +319,12 @@ fn decompress_block_output_ceiling() {
 // ===== Fuzz corpus dict round-trip =====
 //
 // Two-phase design:
-//   1. fuzz_corpus_dict_generate (not(miri)): trains a dict from corpus
-//      plaintexts, compresses each with the dict, writes a fixture file
-//      containing raw dict bytes + (plaintext, compressed) pairs.
-//   2. fuzz_corpus_dict_decode_miri (miri): loads the fixture, parses the
-//      dict, decompresses each frame, verifies. No dict training, no
-//      encoding, no filesystem scanning: pure decode-path coverage.
+//   1. fuzz_corpus_dict_generate: trains a dict from corpus plaintexts,
+//      compresses each with the dict, writes a fixture file containing raw
+//      dict bytes + (plaintext, compressed) pairs.
+//   2. fuzz_corpus_dict_decode: loads the fixture, parses the dict,
+//      decompresses each frame, verifies. No dict training, no encoding, no
+//      corpus scanning: pure decode-path coverage.
 
 const FIXTURE_PATH: &str = "tests/fixtures/corpus_dict_roundtrip.bin";
 
@@ -366,7 +355,7 @@ fn collect_fuzz_corpus_plaintexts() -> Vec<Vec<u8>> {
     plaintexts
 }
 
-#[cfg(all(feature = "dict_builder", not(miri)))]
+#[cfg(feature = "dict_builder")]
 fn write_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
@@ -379,7 +368,7 @@ fn read_u32(data: &[u8], off: &mut usize) -> u32 {
 
 /// Fixture format: [dict_len:u32][dict_bytes][n_pairs:u32]
 ///   per pair: [pt_len:u32][pt_bytes][comp_len:u32][comp_bytes]
-#[cfg(all(feature = "dict_builder", not(miri)))]
+#[cfg(feature = "dict_builder")]
 #[test]
 fn fuzz_corpus_dict_generate() {
     let plaintexts = collect_fuzz_corpus_plaintexts();
@@ -427,13 +416,9 @@ fn fuzz_corpus_dict_generate() {
     );
 }
 
-/// Miri: load pre-built fixture, decode-only. No dict training, no encode.
+/// Load pre-built fixture, decode-only. No dict training, no encode.
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "requires filesystem access; run with -Zmiri-disable-isolation"
-)]
-fn fuzz_corpus_dict_decode_miri() {
+fn fuzz_corpus_dict_decode() {
     let Ok(fixture) = std::fs::read(FIXTURE_PATH) else {
         eprintln!("skipping: run fuzz_corpus_dict_generate first to create fixture");
         return;

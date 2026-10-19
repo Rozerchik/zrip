@@ -1,5 +1,5 @@
-// Property-based tests. Proptest calls getcwd which Miri's isolation blocks.
-#![cfg(all(feature = "std", not(miri)))]
+// Property-based tests.
+#![cfg(feature = "std")]
 
 mod proptest_roundtrip {
     use proptest::prelude::*;
@@ -44,7 +44,6 @@ mod proptest_roundtrip {
     }
 }
 
-#[cfg(not(miri))]
 mod proptest_c_interop {
     use proptest::prelude::*;
 
@@ -99,7 +98,6 @@ mod proptest_c_interop {
     }
 }
 
-#[cfg(not(miri))]
 mod proptest_adversarial {
     use proptest::prelude::*;
 
@@ -223,7 +221,6 @@ mod proptest_structured {
         }
     }
 
-    #[cfg(not(miri))]
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(200))]
 

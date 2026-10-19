@@ -347,7 +347,6 @@ fn reject_repeat_mode_ml_on_first_block() {
     );
 }
 
-#[cfg(not(miri))]
 #[test]
 fn accept_repeat_mode_on_second_block() {
     // Multi-block data: first block sets tables, second can use Repeat.
@@ -364,7 +363,6 @@ fn accept_repeat_mode_on_second_block() {
 
 // ===== Fix 4: Sequence bitstream exact consumption =====
 
-#[cfg(not(miri))]
 #[test]
 fn reject_unconsumed_sequence_bitstream_bits() {
     // Compress data that produces a compressed block with sequences.
@@ -427,7 +425,6 @@ fn reject_unconsumed_sequence_bitstream_bits() {
 
 // ===== Fix 5: Huffman bitstream exact consumption =====
 
-#[cfg(not(miri))]
 #[test]
 fn reject_unconsumed_huffman_bitstream_bits() {
     // Compress data that produces Huffman-compressed literals.
@@ -533,7 +530,7 @@ fn reject_unconsumed_huffman_bitstream_bits() {
 
 // ===== Fix 6: Streaming decoder FCS mismatch =====
 
-#[cfg(all(feature = "std", not(miri)))]
+#[cfg(feature = "std")]
 #[test]
 fn streaming_decoder_rejects_fcs_mismatch() {
     use std::io::Read;
@@ -588,7 +585,6 @@ fn streaming_decoder_rejects_fcs_mismatch() {
 
 // ===== Fix 7: Huffman weight FSE accuracy_log limit (max 6) =====
 
-#[cfg(not(miri))]
 #[test]
 fn reject_huffman_weight_fse_accuracy_above_6() {
     // Compress text data that produces Huffman-compressed literals with an
@@ -668,7 +664,6 @@ fn reject_huffman_weight_fse_accuracy_above_6() {
 
 // ===== Regression: valid frames still decompress correctly =====
 
-#[cfg(not(miri))]
 #[test]
 fn valid_frames_unaffected_by_stricter_checks() {
     // Ensure that the stricter checks don't break any valid frames.
@@ -693,7 +688,7 @@ fn valid_frames_unaffected_by_stricter_checks() {
     }
 }
 
-#[cfg(all(feature = "std", not(miri)))]
+#[cfg(feature = "std")]
 #[test]
 fn streaming_valid_frames_unaffected() {
     use std::io::{Read, Write};

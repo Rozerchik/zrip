@@ -1,12 +1,9 @@
 #![cfg(feature = "std")]
 // Streaming encoder/decoder tests. Pure zrip (no C zstd).
 
-#[cfg(not(miri))]
 const BLOCK: usize = zrip::frame::MAX_BLOCK_SIZE; // 128 KiB
-#[cfg(not(miri))]
 const KNUTH: u32 = 0x9E37_79B1; // xxHash PRIME32_1, used as cheap pseudo-random scatter
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_basic() {
     let original: Vec<u8> = b"ABCDEFGH".iter().cycle().take(10000).copied().collect();
@@ -17,7 +14,6 @@ fn streaming_encoder_basic() {
     assert_eq!(decompressed, original);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_chunked_writes() {
     let original: Vec<u8> = b"the quick brown fox jumps over the lazy dog. "
@@ -114,7 +110,6 @@ fn streaming_encoder_empty() {
     assert_eq!(decompressed, b"");
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_all_levels() {
     let original: Vec<u8> = b"ABCDEFGH".iter().cycle().take(5000).copied().collect();
@@ -229,7 +224,6 @@ fn frame_decoder_basic() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_small_reads() {
     use std::io::Read;
@@ -248,7 +242,6 @@ fn frame_decoder_small_reads() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_multiframe() {
     use std::io::Read;
@@ -286,7 +279,6 @@ fn varied_text(lines: u32) -> Vec<u8> {
 
 /// Consecutive frames whose first compressed blocks share a sequence table
 /// header must each decode with their own tables.
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_repeated_identical_frames() {
     use std::io::Read;
@@ -303,7 +295,6 @@ fn frame_decoder_repeated_identical_frames() {
 
 /// `FrameDecoder::reset` must not carry sequence table state into the next
 /// frame.
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_reset_decodes_the_same_frame_again() {
     use std::io::Read;
@@ -318,7 +309,6 @@ fn frame_decoder_reset_decodes_the_same_frame_again() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_with_checksum() {
     use std::io::Read;
@@ -330,7 +320,6 @@ fn frame_decoder_with_checksum() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_with_limit_rejects_oversized() {
     use std::io::Read;
@@ -342,7 +331,6 @@ fn frame_decoder_with_limit_rejects_oversized() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_with_limit_allows_within_limit() {
     use std::io::Read;
@@ -385,7 +373,6 @@ fn streaming_encoder_reset_empty_frame() {
     assert_eq!(zrip::decompress(&out2).unwrap(), b"after empty");
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_reset_multiple_nodict() {
     use std::io::Write;
@@ -457,7 +444,6 @@ fn streaming_encoder_single_byte() {
     assert_eq!(zrip::decompress(&compressed).unwrap(), b"x");
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_exact_one_block() {
     use std::io::Write;
@@ -473,7 +459,6 @@ fn streaming_encoder_exact_one_block() {
     assert_eq!(zrip::decompress(&compressed).unwrap(), data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_exact_two_blocks() {
     use std::io::Write;
@@ -489,7 +474,6 @@ fn streaming_encoder_exact_two_blocks() {
     assert_eq!(zrip::decompress(&compressed).unwrap(), data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_byte_at_a_time() {
     use std::io::Write;
@@ -507,7 +491,6 @@ fn streaming_encoder_byte_at_a_time() {
     assert_eq!(zrip::decompress(&compressed).unwrap(), data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_flush_mid_stream() {
     use std::io::Write;
@@ -523,7 +506,6 @@ fn streaming_encoder_flush_mid_stream() {
     assert_eq!(zrip::decompress(&compressed).unwrap(), expected);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_triggers_compaction() {
     use std::io::Write;
@@ -541,7 +523,6 @@ fn streaming_encoder_triggers_compaction() {
     assert_eq!(zrip::decompress(&compressed).unwrap(), data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_compaction_all_levels() {
     use std::io::Write;
@@ -561,7 +542,6 @@ fn streaming_encoder_compaction_all_levels() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_roundtrip_parity_with_singleshot() {
     use std::io::Write;
@@ -609,7 +589,6 @@ fn frame_decoder_empty() {
     assert_eq!(output, b"");
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_multiblock_all_levels() {
     use std::io::Read;
@@ -628,7 +607,6 @@ fn frame_decoder_multiblock_all_levels() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_decoder_all_levels() {
     use std::io::{Read, Write};
@@ -651,7 +629,6 @@ fn streaming_encoder_decoder_all_levels() {
 
 // ===== Options in streaming mode =====
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_with_options_window_log() {
     use std::io::{Read, Write};
@@ -671,7 +648,6 @@ fn streaming_encoder_with_options_window_log() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_with_options_reset() {
     use std::io::Write;
@@ -699,7 +675,6 @@ fn streaming_encoder_with_options_reset() {
 
 // ===== Cross-block matching =====
 
-#[cfg(not(miri))]
 fn make_multiblock_data(total: usize, pattern_len: usize, distance: usize) -> Vec<u8> {
     let mut data = vec![0u8; total];
     for (i, b) in data.iter_mut().enumerate() {
@@ -715,7 +690,6 @@ fn make_multiblock_data(total: usize, pattern_len: usize, distance: usize) -> Ve
     data
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_multiblock_crossblock_refs() {
     use std::io::Read;
@@ -732,7 +706,6 @@ fn frame_decoder_multiblock_crossblock_refs() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn frame_decoder_multiblock_c_zstd_data() {
     use std::io::Read;
@@ -749,7 +722,6 @@ fn frame_decoder_multiblock_c_zstd_data() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_multiblock_roundtrip() {
     use std::io::Write;
@@ -764,7 +736,6 @@ fn streaming_encoder_multiblock_roundtrip() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_multiblock_c_zstd_decompress() {
     use std::io::Write;
@@ -783,7 +754,6 @@ fn streaming_encoder_multiblock_c_zstd_decompress() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_crossblock_improves_ratio() {
     use std::io::Write;
@@ -819,7 +789,6 @@ fn streaming_encoder_crossblock_improves_ratio() {
     );
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_decoder_multiblock_roundtrip() {
     use std::io::{Read, Write};
@@ -833,7 +802,6 @@ fn streaming_encoder_decoder_multiblock_roundtrip() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_reset_clears_history() {
     use std::io::Write;
@@ -850,7 +818,6 @@ fn streaming_encoder_reset_clears_history() {
 
 // ===== Large multiblock streaming =====
 
-#[cfg(not(miri))]
 #[test]
 fn streaming_encoder_decoder_multiblock_large() {
     use std::io::{Read, Write};
@@ -881,7 +848,6 @@ fn options_window_log_only() {
     assert!(zrip::compress(b"hello", 5).is_err());
 }
 
-#[cfg(not(miri))]
 #[test]
 fn options_window_log_roundtrip() {
     let data: Vec<u8> = b"options window log test "
@@ -898,10 +864,8 @@ fn options_window_log_roundtrip() {
 
 #[cfg(feature = "ldm")]
 mod ldm {
-    #[cfg(not(miri))]
     use super::{BLOCK, KNUTH};
 
-    #[cfg(not(miri))]
     #[test]
     fn roundtrip_with_options_ldm() {
         let data: Vec<u8> = b"LDM roundtrip test data "
@@ -916,7 +880,6 @@ mod ldm {
         assert_eq!(decompressed, data);
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn c_zstd_decompresses_options_ldm() {
         let data: Vec<u8> = b"cross validate options LDM "
@@ -931,7 +894,6 @@ mod ldm {
         assert_eq!(decompressed, data);
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn streaming_with_options_ldm() {
         use std::io::{Read, Write};
@@ -951,7 +913,6 @@ mod ldm {
         assert_eq!(output, data);
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn long_range_match_improves_ratio() {
         let dup_block: Vec<u8> = b"DUPLICATED_BLOCK_CONTENT_"
@@ -982,7 +943,6 @@ mod ldm {
         );
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn with_window_log_roundtrip() {
         let data: Vec<u8> = b"custom window log test "
@@ -999,7 +959,6 @@ mod ldm {
         assert_eq!(decompressed, data);
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn streaming_ldm_reset() {
         use std::io::Write;
@@ -1025,7 +984,6 @@ mod ldm {
         assert_eq!(zrip::decompress(&out2).unwrap(), d2);
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn streaming_ldm_c_zstd_decompresses() {
         use std::io::Write;
@@ -1043,7 +1001,6 @@ mod ldm {
         assert_eq!(decompressed, data);
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn roundtrip_ldm_all_levels() {
         let data: Vec<u8> = b"LDM all levels roundtrip "
@@ -1061,7 +1018,6 @@ mod ldm {
         }
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn streaming_ldm_cross_block_improves_ratio() {
         use std::io::Write;
@@ -1100,7 +1056,6 @@ mod ldm {
         );
     }
 
-    #[cfg(not(miri))]
     #[test]
     fn with_ldm_custom_roundtrip() {
         let data: Vec<u8> = b"custom LDM params test "

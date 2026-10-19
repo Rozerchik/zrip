@@ -3,9 +3,6 @@ static HAS_BMI2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 #[cfg(feature = "std")]
 pub fn has_bmi2() -> bool {
-    if cfg!(miri) {
-        return false;
-    }
     *HAS_BMI2.get_or_init(detect_bmi2)
 }
 

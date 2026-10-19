@@ -196,8 +196,7 @@ let dict = train_dict_fastcover(&samples, 16384, FastCoverParams::default());
 [SAFETY.md](SAFETY.md) describes how zrip stays fast without `unsafe` and
 catalogs C zstd memory safety bugs that Rust prevents by construction.
 
-All codec paths are fuzz-tested (16 targets, ~10.7M executions) and verified
-under Miri on both x86_64 and aarch64. Fuzz targets cover round-trip
+All codec paths are fuzz-tested (17 targets). Fuzz targets cover round-trip
 correctness, cross-validation against C zstd, streaming, dictionary modes,
 and corruption resistance (bitflip, splice, truncate, overwrite).
 

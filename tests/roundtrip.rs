@@ -1,8 +1,6 @@
 // Pure zrip roundtrip tests (no C zstd dependency).
 
-#[cfg(not(miri))]
 const BLOCK: usize = zrip::frame::MAX_BLOCK_SIZE; // 128 KiB
-#[cfg(not(miri))]
 const KNUTH: u32 = 0x9E37_79B1; // xxHash PRIME32_1, used as cheap pseudo-random scatter
 
 #[test]
@@ -13,7 +11,6 @@ fn roundtrip_zrip_compress_decompress() {
     assert_eq!(decompressed, original);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_all_levels_repetitive() {
     let original: Vec<u8> = b"ABCDEFGH".iter().cycle().take(200_000).copied().collect();
@@ -25,7 +22,6 @@ fn roundtrip_all_levels_repetitive() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_all_levels_random() {
     let original: Vec<u8> = (0..100_000u32)
@@ -39,7 +35,6 @@ fn roundtrip_all_levels_random() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_zeros() {
     let original = vec![0u8; 100_000];
@@ -66,7 +61,6 @@ fn roundtrip_small() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_large() {
     let original: Vec<u8> = b"ABCDEFGH".iter().cycle().take(200_000).copied().collect();
@@ -75,7 +69,6 @@ fn roundtrip_large() {
     assert_eq!(decompressed, original);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_all_same_bytes() {
     for b in [0u8, 1, 127, 128, 254, 255] {
@@ -86,7 +79,6 @@ fn roundtrip_all_same_bytes() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_block_boundary_sizes() {
     for size in [BLOCK - 1, BLOCK, BLOCK + 1, 2 * BLOCK, 2 * BLOCK + 1] {
@@ -98,7 +90,6 @@ fn roundtrip_block_boundary_sizes() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_single_bytes() {
     for b in 0u8..=255 {
@@ -110,7 +101,6 @@ fn roundtrip_single_bytes() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_size_sweep() {
     for exp in 0..=17 {
@@ -123,7 +113,6 @@ fn roundtrip_size_sweep() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_all_levels_all_patterns() {
     let patterns: Vec<(&str, Vec<u8>)> = vec![
@@ -165,7 +154,6 @@ fn roundtrip_all_levels_all_patterns() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_exact_block_fill() {
     for delta in [-2i32, -1, 0, 1, 2] {
@@ -183,7 +171,6 @@ fn roundtrip_exact_block_fill() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_incompressible_random() {
     let data: Vec<u8> = (0..50_000u64)
@@ -202,7 +189,6 @@ fn roundtrip_incompressible_random() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_mixed_compressible_incompressible() {
     let mut data = Vec::with_capacity(100_000);
@@ -228,7 +214,6 @@ fn roundtrip_mixed_compressible_incompressible() {
 
 // ===== Zero literal length sequences =====
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_zero_literal_lengths() {
     let data = vec![0xABu8; 200_000];
@@ -240,7 +225,6 @@ fn roundtrip_zero_literal_lengths() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_alternating_rep_offsets_ll0() {
     let mut data = Vec::with_capacity(100_000);
@@ -266,7 +250,6 @@ fn roundtrip_alternating_rep_offsets_ll0() {
 
 // ===== Edge-case match lengths =====
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_match_length_boundaries() {
     let mut data = Vec::with_capacity(200_000);
@@ -293,7 +276,6 @@ fn roundtrip_match_length_boundaries() {
 
 // ===== RLE-mode FSE tables =====
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_single_symbol_distribution() {
     let mut data = Vec::with_capacity(100_000);
@@ -312,7 +294,6 @@ fn roundtrip_single_symbol_distribution() {
 
 // ===== Large literal lengths =====
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_large_literal_runs() {
     let mut data = Vec::with_capacity(200_000);
@@ -351,7 +332,6 @@ fn decompress_empty_input() {
     assert_eq!(result, Vec::<u8>::new());
 }
 
-#[cfg(not(miri))]
 #[test]
 fn compress_level_zero_is_default() {
     let data = b"ABCDEFGH".repeat(1000);
@@ -396,7 +376,6 @@ fn checksum_mismatch_detected() {
     assert!(zrip::decompress(&compressed).is_err());
 }
 
-#[cfg(not(miri))]
 #[test]
 fn checksum_various_sizes() {
     for size in [0, 1, 100, 1000, 10000, 100_000] {
@@ -409,7 +388,6 @@ fn checksum_various_sizes() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn checksum_validated_on_multiblock() {
     let data: Vec<u8> = b"checksum test data "
@@ -476,10 +454,8 @@ fn compress_context_can_omit_content_checksum() {
 #[test]
 fn compress_context_compress_into_matches_compress() {
     let text = b"caller-owned output buffers for compressed frames ".repeat(40);
-    #[cfg(not(miri))]
     let large: Vec<u8> = text.iter().cycle().take(300_000).copied().collect();
     let mut inputs: Vec<&[u8]> = vec![b"", b"x", &text];
-    #[cfg(not(miri))]
     inputs.push(&large);
 
     for level in [-7, -1, 1, 3, 4] {
@@ -525,7 +501,6 @@ fn compress_context_compress_into_rejects_small_output() {
     assert_eq!(zrip::decompress(&exact).unwrap(), data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_context_borrows_large_output_for_reuse() {
     let data = vec![0x42u8; 600 * 1024];
@@ -540,7 +515,6 @@ fn decompress_context_borrows_large_output_for_reuse() {
 
 // ===== Output size limits =====
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_refuses_output_exceeding_max_raw_block() {
     let data = vec![0x42u8; 10_000];
@@ -609,7 +583,6 @@ fn reverse_bit_reader_1_byte() {
 
 // ===== decompress_into =====
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_into_basic() {
     let data = b"Hello, decompress_into!".repeat(1000);
@@ -620,7 +593,6 @@ fn decompress_into_basic() {
     assert_eq!(output, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_into_appends() {
     let data = b"append test data".repeat(500);
@@ -632,7 +604,6 @@ fn decompress_into_appends() {
     assert_eq!(&output[6..], &data[..]);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn decompress_into_preallocated() {
     let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
@@ -643,7 +614,7 @@ fn decompress_into_preallocated() {
     assert_eq!(output, data);
 }
 
-// ===== Miri-compatible decode path exercisers =====
+// ===== Small-input decode path exercisers =====
 
 #[test]
 fn roundtrip_small_offset_matches() {
@@ -685,7 +656,6 @@ fn roundtrip_varied_literal_sizes() {
 
 // ===== compress_bound =====
 
-#[cfg(not(miri))]
 #[test]
 fn compress_bound_covers_actual_output() {
     let sizes = [0, 1, 100, 1024, BLOCK, BLOCK + 1, 1_000_000];
@@ -713,7 +683,6 @@ fn compress_bound_edge_cases() {
 
 // ===== compress_with_params =====
 
-#[cfg(not(miri))]
 #[test]
 fn compress_with_params_roundtrip() {
     let data = b"params test".repeat(5000);
@@ -735,7 +704,6 @@ fn compress_with_params_roundtrip() {
     assert_eq!(decompressed, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn compress_with_params_dfast() {
     let data = b"dfast params".repeat(5000);
@@ -757,7 +725,6 @@ fn compress_with_params_dfast() {
     assert_eq!(decompressed, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn compress_with_params_clamps_degenerate_hash_log() {
     let data = b"abcdefghijklmnop".repeat(100);
@@ -769,7 +736,6 @@ fn compress_with_params_clamps_degenerate_hash_log() {
     assert_eq!(decompressed, data);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn compress_with_params_clamps_excessive_hash_log() {
     let data = b"abcdefghijklmnop".repeat(100);
@@ -835,7 +801,6 @@ fn decompress_concatenated_frames() {
     assert_eq!(decompressed, expected);
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_concatenated_frames() {
     let data1: Vec<u8> = (0..50_000).map(|i| (i % 251) as u8).collect();
@@ -853,7 +818,6 @@ fn roundtrip_concatenated_frames() {
 
 // ===== Block boundary edge cases =====
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_exactly_one_block() {
     let data: Vec<u8> = b"block boundary test pattern! "
@@ -870,7 +834,6 @@ fn roundtrip_exactly_one_block() {
     }
 }
 
-#[cfg(not(miri))]
 #[test]
 fn roundtrip_incompressible_multiblock() {
     let data: Vec<u8> = (0..2 * BLOCK as u32)
@@ -911,7 +874,6 @@ fn xxh64_checksum_roundtrip() {
 
 /// A frame that fails before its sequence tables are read must not change
 /// how a reused context decodes the next valid frame.
-#[cfg(not(miri))]
 #[test]
 fn decompress_context_recovers_after_a_corrupt_frame() {
     let data: Vec<u8> = (0..1500u32)

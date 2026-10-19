@@ -1,5 +1,5 @@
-// C zstd cross-validation tests. Skipped under Miri (FFI unsupported).
-#![cfg(all(feature = "std", not(miri)))]
+// C zstd cross-validation tests.
+#![cfg(feature = "std")]
 
 const BLOCK: usize = zrip::frame::MAX_BLOCK_SIZE; // 128 KiB
 const KNUTH: u32 = 0x9E37_79B1;

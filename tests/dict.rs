@@ -567,7 +567,7 @@ fn streaming_decoder_dict_mismatch() {
 
 /// Consecutive dictionary frames whose first compressed blocks share a
 /// sequence table header must each decode with their own tables.
-#[cfg(all(feature = "dict_builder", not(miri)))]
+#[cfg(feature = "dict_builder")]
 #[test]
 fn frame_decoder_dict_repeated_identical_frames() {
     use std::io::Read;
