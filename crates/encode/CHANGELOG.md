@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-20
+
+- Add `adaptive::AdaptiveLevel`, which walks the compression level toward
+  ratio or speed from per-window `CompressStats` and a `Bottleneck`.
+- Add `CompressContext::set_level` and `CompressContext::level`.
+- Dictionaries at levels -7 to 2 use the regular fast match finder, so they
+  no longer cost ratio. Inputs up to 8 KiB keep the dictionary in a
+  separate table.
+- Faster encoding of compressible blocks with Huffman literals. Output is
+  unchanged.
+
 ## [0.9.1] - 2026-10-19
 
 - Enforce `#![forbid(unsafe_code)]` for every build. The `paranoid` feature
