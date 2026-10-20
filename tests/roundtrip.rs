@@ -902,6 +902,7 @@ fn decompress_context_recovers_after_a_corrupt_frame() {
     }
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn set_level_matches_a_fresh_context() {
     let text: Vec<u8> = (0..20_000)
