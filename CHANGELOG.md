@@ -10,6 +10,13 @@
 - `CompressContext::set_level()` and `CompressContext::level()`. A context
   with a dictionary prepares it again for the new level.
 
+### Changed
+
+- Faster encoding of compressible blocks with Huffman literals. The
+  incompressibility probe stops at the first byte value past its bound, and
+  the literal histogram reuses the density sample's counts. Output is
+  unchanged.
+
 ### Fixed
 
 - Dictionaries at levels -7 to 2 no longer cost ratio. Inputs up to 16 KiB

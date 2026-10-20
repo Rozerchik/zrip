@@ -200,6 +200,13 @@ fn block_looks_incompressible(data: &[u8]) -> bool {
     // Four interleaved tables, so runs of one byte value do not serialize on
     // a single counter.
     let mut counts = [[0u16; 256]; 4];
+    let bound = ((WINDOWS * WINDOW) >> 7) + 4;
+    let largest = |counts: &[[u16; 256]; 4]| {
+        (0..256)
+            .map(|i| usize::from(counts[0][i] + counts[1][i] + counts[2][i] + counts[3][i]))
+            .max()
+            .unwrap()
+    };
     for w in 0..WINDOWS {
         let start = data.len() * w / WINDOWS;
         let (chunks, _) = data[start..start + WINDOW].as_chunks::<4>();
@@ -209,12 +216,12 @@ fn block_looks_incompressible(data: &[u8]) -> bool {
             counts[2][c[2] as usize] += 1;
             counts[3][c[3] as usize] += 1;
         }
+        // Counts only grow: one value past the bound settles it.
+        if largest(&counts) > bound {
+            return false;
+        }
     }
-    let largest = (0..256)
-        .map(|i| usize::from(counts[0][i] + counts[1][i] + counts[2][i] + counts[3][i]))
-        .max()
-        .unwrap();
-    largest <= ((WINDOWS * WINDOW) >> 7) + 4
+    true
 }
 
 pub(crate) fn clamp_params_to_src_size(params: &mut strategy::LevelParams, src_len: usize) {

@@ -953,10 +953,9 @@ fn encode_literals_section(
     // Dense literals stay raw. Long runs are judged by a sample, so they
     // skip the full histogram when they fail.
     let limit = policy.max_literal_entropy_fp8;
-    if limit != u32::MAX
-        && lits.len() > DENSITY_SAMPLE
-        && histogram_too_dense(&byte_histogram(&lits[..DENSITY_SAMPLE]), limit)
-    {
+    let sample = (limit != u32::MAX && lits.len() > DENSITY_SAMPLE)
+        .then(|| byte_histogram(&lits[..DENSITY_SAMPLE]));
+    if sample.is_some_and(|sample| histogram_too_dense(&sample, limit)) {
         *prev_huffman = None;
         encode_raw_literals_header(lits.len(), output);
         return true;
@@ -974,7 +973,14 @@ fn encode_literals_section(
             return true;
         }
     }
-    let freqs = byte_histogram(lits);
+    // The density sample already counted the head.
+    let freqs = match sample {
+        Some(head) => {
+            let rest = byte_histogram(&lits[DENSITY_SAMPLE..]);
+            core::array::from_fn(|i| head[i] + rest[i])
+        }
+        None => byte_histogram(lits),
+    };
     if histogram_too_dense(&freqs, FLAT_LITERALS_FP8) {
         *prev_huffman = None;
         encode_raw_literals_header(lits.len(), output);
