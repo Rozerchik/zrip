@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-10-20
+
 ### Added
 
 - `zrip::adaptive::AdaptiveLevel` walks the compression level toward ratio
@@ -16,6 +18,7 @@
   incompressibility probe stops at the first byte value past its bound, and
   the literal histogram reuses the density sample's counts. Output is
   unchanged.
+- Bump the JSR and npm packages to `0.5.14`.
 
 ### Fixed
 
