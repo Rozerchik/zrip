@@ -1,5 +1,5 @@
-<svg viewBox="0 0 700 463" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
-<rect x="0" y="0" width="700" height="463" opacity="1" fill="#0D1117" stroke="none"/>
+<svg viewBox="0 0 700 483" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
+<rect x="0" y="0" width="700" height="483" opacity="1" fill="#0D1117" stroke="none"/>
 <text x="350" y="22" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="12.096774193548388" opacity="1" fill="#E6EDF3" font-weight="bold">
 12-file Silesia: Pipeline @100 MB/s geomean, L-7..L4 (ruzstd L1)
 </text>
@@ -22,28 +22,34 @@ seconds / GB
 30.0
 </text>
 <polyline fill="none" opacity="1" stroke="#30363D" stroke-width="2" points="70,313 680,313 "/>
-<rect x="167" y="293" width="80" height="20" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="167" y="260" width="80" height="33" opacity="1" fill="#4680C4" stroke="none"/>
-<rect x="167" y="255" width="80" height="5" opacity="1" fill="#60A5FA" stroke="none"/>
-<text x="207" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+<rect x="111" y="293" width="80" height="20" opacity="1" fill="#60A5FA" stroke="none"/>
+<rect x="111" y="260" width="80" height="33" opacity="1" fill="#4680C4" stroke="none"/>
+<rect x="111" y="255" width="80" height="5" opacity="1" fill="#60A5FA" stroke="none"/>
+<text x="151" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
 C zstd
 </text>
-<rect x="279" y="289" width="80" height="24" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="279" y="259" width="80" height="30" opacity="1" fill="#C45050" stroke="none"/>
-<rect x="279" y="252" width="80" height="7" opacity="1" fill="#F87171" stroke="none"/>
-<text x="319" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+<rect x="223" y="289" width="80" height="24" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="223" y="259" width="80" height="30" opacity="1" fill="#C45050" stroke="none"/>
+<rect x="223" y="251" width="80" height="8" opacity="1" fill="#F87171" stroke="none"/>
+<text x="263" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
 zrip
 </text>
-<rect x="391" y="285" width="80" height="28" opacity="1" fill="#F59E0B" stroke="none"/>
-<rect x="391" y="252" width="80" height="33" opacity="1" fill="#C47D08" stroke="none"/>
-<rect x="391" y="245" width="80" height="7" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="431" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+<rect x="335" y="285" width="80" height="28" opacity="1" fill="#F59E0B" stroke="none"/>
+<rect x="335" y="252" width="80" height="33" opacity="1" fill="#C47D08" stroke="none"/>
+<rect x="335" y="245" width="80" height="7" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="375" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
 structured-zstd
 </text>
-<rect x="503" y="162" width="80" height="151" opacity="1" fill="#4ADE80" stroke="none"/>
-<rect x="503" y="127" width="80" height="35" opacity="1" fill="#3AAF60" stroke="none"/>
-<rect x="503" y="96" width="80" height="31" opacity="1" fill="#4ADE80" stroke="none"/>
-<text x="543" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+<rect x="447" y="291" width="80" height="22" opacity="1" fill="#2DD4BF" stroke="none"/>
+<rect x="447" y="258" width="80" height="33" opacity="1" fill="#22A896" stroke="none"/>
+<rect x="447" y="252" width="80" height="6" opacity="1" fill="#2DD4BF" stroke="none"/>
+<text x="487" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
+mzstd
+</text>
+<rect x="559" y="162" width="80" height="151" opacity="1" fill="#4ADE80" stroke="none"/>
+<rect x="559" y="127" width="80" height="35" opacity="1" fill="#3AAF60" stroke="none"/>
+<rect x="559" y="96" width="80" height="31" opacity="1" fill="#4ADE80" stroke="none"/>
+<text x="599" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
 ruzstd
 </text>
 <rect x="115" y="359" width="12" height="12" opacity="1" fill="#60A5FA" stroke="none"/>
@@ -54,18 +60,22 @@ libzstd v1.5.7 (C)
 <text x="133" y="385" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 zrip (safe Rust, SIMD)
 </text>
-<rect x="385" y="359" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
-<text x="403" y="365" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+<rect x="115" y="399" width="12" height="12" opacity="1" fill="#F59E0B" stroke="none"/>
+<text x="133" y="405" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 structured-zstd v0.0.55 (unsafe)
+</text>
+<rect x="385" y="359" width="12" height="12" opacity="1" fill="#2DD4BF" stroke="none"/>
+<text x="403" y="365" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
+mzstd v0.2.8 (safe)
 </text>
 <rect x="385" y="379" width="12" height="12" opacity="1" fill="#4ADE80" stroke="none"/>
 <text x="403" y="385" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3">
 ruzstd v0.8.3 (safe)
 </text>
-<text x="140" y="423" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
+<text x="140" y="443" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#E6EDF3">
 bright = compress + decompress
 </text>
-<text x="380" y="423" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
+<text x="380" y="443" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="8.064516129032258" opacity="1" fill="#7D8590">
 dim = transfer @100 MB/s
 </text>
 </svg>
