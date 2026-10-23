@@ -245,19 +245,34 @@ impl Config {
                     0xc47d08,
                 ),
                 codec("ruzstd", "ruzstd v0.8.3 (safe)", 0x4ade80, 0x3aaf60),
+                codec("mzstd", "mzstd v0.2.8 (safe)", 0x2dd4bf, 0x22a896),
                 codec(
                     "lz4rip",
-                    "lz4rip v0.11.7 (encapsulated unsafe, Rust, LZ4)",
+                    "lz4rip v0.12.1 (safe Rust, LZ4)",
                     0xc084fc,
                     0x9966cc,
                 ),
             ],
-            scatter_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd", "lz4rip"],
-            summary_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd"],
-            matrix_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd"],
-            pipeline_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd"],
-            small_codecs: vec!["C zstd", "zrip", "structured-zstd", "lz4rip"],
-            small_decode_codecs: vec!["C zstd", "zrip", "structured-zstd", "ruzstd", "lz4rip"],
+            scatter_codecs: vec![
+                "C zstd",
+                "zrip",
+                "structured-zstd",
+                "mzstd",
+                "ruzstd",
+                "lz4rip",
+            ],
+            summary_codecs: vec!["C zstd", "zrip", "structured-zstd", "mzstd", "ruzstd"],
+            matrix_codecs: vec!["C zstd", "zrip", "structured-zstd", "mzstd", "ruzstd"],
+            pipeline_codecs: vec!["C zstd", "zrip", "structured-zstd", "mzstd", "ruzstd"],
+            small_codecs: vec!["C zstd", "zrip", "structured-zstd", "mzstd", "lz4rip"],
+            small_decode_codecs: vec![
+                "C zstd",
+                "zrip",
+                "structured-zstd",
+                "mzstd",
+                "ruzstd",
+                "lz4rip",
+            ],
         }
     }
 
@@ -624,7 +639,7 @@ fn small_names(suffixes: &[&str]) -> Vec<String> {
 fn supported_encode_levels(codec: &str) -> Vec<i32> {
     match codec {
         "zrip" => BAND_LEVELS.to_vec(),
-        "C zstd" | "structured-zstd" => C_ZSTD_LEVELS.to_vec(),
+        "C zstd" | "structured-zstd" | "mzstd" => C_ZSTD_LEVELS.to_vec(),
         "ruzstd" | "lz4rip" => vec![LEVEL],
         _ => vec![LEVEL],
     }
