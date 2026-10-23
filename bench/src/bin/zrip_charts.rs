@@ -248,7 +248,7 @@ impl Config {
                 codec("mzstd", "mzstd v0.2.8 (safe)", 0x2dd4bf, 0x22a896),
                 codec(
                     "lz4rip",
-                    "lz4rip v0.11.7 (encapsulated unsafe, Rust, LZ4)",
+                    "lz4rip v0.12.1 (safe Rust, LZ4)",
                     0xc084fc,
                     0x9966cc,
                 ),
