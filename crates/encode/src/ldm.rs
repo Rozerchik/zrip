@@ -811,4 +811,3 @@ mod tests {
         assert!(find_repeat(WINDOW * 2, WINDOW).is_empty());
     }
 }
-
