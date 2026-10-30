@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The npm package export gains a `default` condition, so
+  `require.resolve("@paddor/zrip")` finds the entry and the WASM files
+  next to it. Bump the npm package to `0.5.15`.
+
 ## [0.8.13] - 2026-10-20
 
 ### Added

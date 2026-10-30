@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import test from "node:test";
 import {
   compress,
@@ -69,4 +72,15 @@ test("stateful decompressor", () => {
 
   assert.deepEqual(decompressor.decompress(compressed), data);
   decompressor.free();
+});
+
+test("package layout serves the WASM next to the resolved entry", () => {
+  // Consumers such as OMQ.ts load the bytes this way in Node.
+  const require = createRequire(import.meta.url);
+  const entry = require.resolve("@paddor/zrip");
+  for (const file of ["zrip_wasm_bg.wasm", "zrip_simd.wasm"]) {
+    const wasm = resolve(dirname(entry), "pkg", file);
+    assert.ok(existsSync(wasm));
+    assert.ok(WebAssembly.validate(readFileSync(wasm)));
+  }
 });
