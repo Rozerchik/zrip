@@ -109,7 +109,7 @@ dickens
 <circle cx="657" cy="182" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
 <circle cx="718" cy="178" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
 <circle cx="778" cy="179" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="0.6" stroke="#F87171" stroke-width="1" points="112,232 172,219 233,202 293,199 354,198 415,192 475,185 536,181 596,178 657,179 718,180 778,181 "/>
+<polyline fill="none" opacity="0.6" stroke="#F87171" stroke-width="1" points="112,232 172,219 233,202 293,199 354,198 415,192 475,185 536,181 596,178 657,179 718,179 778,180 "/>
 <polyline fill="none" opacity="1" stroke="#F59E0B" stroke-width="2" points="112,243 172,238 233,222 293,210 354,204 415,200 475,190 536,188 596,187 657,194 718,190 778,190 "/>
 <circle cx="112" cy="243" r="3" opacity="1" fill="#F59E0B" stroke="none" stroke-width="1"/>
 <circle cx="172" cy="238" r="3" opacity="1" fill="#F59E0B" stroke="none" stroke-width="1"/>
@@ -263,7 +263,7 @@ nci
 <circle cx="657" cy="407" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
 <circle cx="718" cy="403" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
 <circle cx="778" cy="402" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="0.6" stroke="#F87171" stroke-width="1" points="112,485 172,467 233,485 293,465 354,449 415,434 475,426 536,419 596,412 657,410 718,409 778,408 "/>
+<polyline fill="none" opacity="0.6" stroke="#F87171" stroke-width="1" points="112,484 172,467 233,485 293,465 354,449 415,434 475,425 536,419 596,412 657,410 718,409 778,409 "/>
 <polyline fill="none" opacity="1" stroke="#F59E0B" stroke-width="2" points="112,501 172,496 233,495 293,466 354,446 415,433 475,420 536,414 596,407 657,409 718,404 778,404 "/>
 <circle cx="112" cy="501" r="3" opacity="1" fill="#F59E0B" stroke="none" stroke-width="1"/>
 <circle cx="172" cy="496" r="3" opacity="1" fill="#F59E0B" stroke="none" stroke-width="1"/>
@@ -579,7 +579,7 @@ x-ray
 <circle cx="657" cy="1009" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
 <circle cx="718" cy="1006" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
 <circle cx="778" cy="1007" r="3" opacity="1" fill="#F87171" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="0.6" stroke="#F87171" stroke-width="1" points="112,1054 172,1031 233,1018 293,1009 354,1003 415,999 475,998 536,997 596,997 657,998 718,1000 778,1003 "/>
+<polyline fill="none" opacity="0.6" stroke="#F87171" stroke-width="1" points="112,1054 172,1031 233,1018 293,1009 354,1003 415,999 475,997 536,997 596,997 657,997 718,998 778,1000 "/>
 <polyline fill="none" opacity="1" stroke="#F59E0B" stroke-width="2" points="112,1060 172,1042 233,1026 293,1018 354,1016 415,1012 475,1007 536,1004 596,1004 657,1016 718,1010 778,1012 "/>
 <circle cx="112" cy="1060" r="3" opacity="1" fill="#F59E0B" stroke="none" stroke-width="1"/>
 <circle cx="172" cy="1042" r="3" opacity="1" fill="#F59E0B" stroke="none" stroke-width="1"/>

@@ -6,6 +6,8 @@
 
 - Retune L-3, L-2, L-1, and L1 for faster encoding of low-compressibility
   inputs, with slightly lower compression ratios.
+- Further tune L1, L2, and L3 for faster encoding of low-compressibility
+  inputs, trading more compression ratio for throughput.
 
 ### Fixed
 

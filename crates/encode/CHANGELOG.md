@@ -5,6 +5,10 @@
 - Retune L-3, L-2, L-1, and L1 to search less in long literal runs. This
   speeds up low-compressibility inputs with slightly lower compression
   ratios.
+- L1 and L2 use 7-byte hashes and faster search-step growth. Above 256 KiB,
+  L3 grows its search step after each unsuccessful probe; smaller inputs
+  keep the denser search. Low-compressibility inputs encode faster at the
+  cost of compression ratio.
 
 ## [0.9.2] - 2026-10-20
 
