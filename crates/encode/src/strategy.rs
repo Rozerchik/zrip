@@ -257,6 +257,9 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
+        // L-3 through L1 grow the step every 32 bytes without a match.
+        // Long literal runs need fewer probes, while frequent matches keep
+        // the initial step and most of the compression ratio.
         -3 => LevelParams {
             strategy: Strategy::Fast,
             window_log: 19,
@@ -265,7 +268,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 4,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -278,7 +281,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 3,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -291,7 +294,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 2,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -304,7 +307,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 1,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Retune L-3, L-2, L-1, and L1 for faster encoding of low-compressibility
+  inputs, with slightly lower compression ratios.
+
 ### Fixed
 
 - The npm package export gains a `default` condition, so

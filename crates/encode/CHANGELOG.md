@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Retune L-3, L-2, L-1, and L1 to search less in long literal runs. This
+  speeds up low-compressibility inputs with slightly lower compression
+  ratios.
+
 ## [0.9.2] - 2026-10-20
 
 - Add `adaptive::AdaptiveLevel`, which walks the compression level toward
