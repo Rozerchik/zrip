@@ -9,6 +9,8 @@
   L3 grows its search step after each unsuccessful probe; smaller inputs
   keep the denser search. Low-compressibility inputs encode faster at the
   cost of compression ratio.
+- L4 uses faster search-step growth above 256 KiB for better throughput
+  on low-compressibility inputs. Smaller inputs keep the denser search.
 
 ## [0.9.2] - 2026-10-20
 

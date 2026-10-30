@@ -2017,6 +2017,7 @@ fn draw_small_encode(cfg: &Config, out_dir: &Path) -> Result<(), Box<dyn Error>>
                 )?;
             }
         }
+        let mut end_labels = Vec::new();
         for codec in &cfg.small_codecs {
             let rows = data.get(*codec).cloned().unwrap_or_default();
             if rows.is_empty() {
@@ -2037,6 +2038,11 @@ fn draw_small_encode(cfg: &Config, out_dir: &Path) -> Result<(), Box<dyn Error>>
             if codec_levels.is_empty() {
                 continue;
             }
+            let Some((fastest_level, slowest_level)) =
+                small_endpoint_levels(&rows, prefix, &codec_levels)
+            else {
+                continue;
+            };
             for level in INTERIOR_LEVELS.iter().filter(|l| codec_levels.contains(l)) {
                 let pts = small_points(
                     &rows,
@@ -2049,18 +2055,11 @@ fn draw_small_encode(cfg: &Config, out_dir: &Path) -> Result<(), Box<dyn Error>>
                 );
                 polyline(&area, &pts, style.color, 1, 0.35, false)?;
                 if *level == LABEL_LEVEL
+                    && *level != fastest_level
+                    && *level != slowest_level
                     && let Some(&(x, y)) = pts.last()
                 {
-                    text(
-                        &area,
-                        fmt_level(*level),
-                        px(x + 6.0),
-                        px(y),
-                        7,
-                        style.color,
-                        HPos::Left,
-                        true,
-                    )?;
+                    end_labels.push((x, y, fmt_level(*level), style.color));
                 }
             }
             let (lo, hi) = band_envelope(&rows, prefix, &codec_levels, map_x, map_y);
@@ -2071,26 +2070,41 @@ fn draw_small_encode(cfg: &Config, out_dir: &Path) -> Result<(), Box<dyn Error>>
                 polyline(&area, &lo, style.color, 2, 1.0, true)?;
             }
             let ends = [
-                (&hi, fmt_scatter_level(codec, codec_levels[0])),
-                (&lo, fmt_level(*codec_levels.last().unwrap())),
+                (&hi, fmt_scatter_level(codec, fastest_level)),
+                (&lo, fmt_level(slowest_level)),
             ];
             for (pts, label) in &ends[..if single { 1 } else { 2 }] {
                 for &(x, y) in pts.iter() {
                     dot(&area, x, y, 3, style.color)?;
                 }
                 if let Some(&(x, y)) = pts.last() {
-                    text(
-                        &area,
-                        label.as_str(),
-                        px(x + 6.0),
-                        px(y),
-                        7,
-                        style.color,
-                        HPos::Left,
-                        true,
-                    )?;
+                    end_labels.push((x, y, label.clone(), style.color));
                 }
             }
+        }
+        // Keep labels in endpoint order, with room for each line of text.
+        end_labels.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let desired_ys = end_labels.iter().map(|label| label.1).collect::<Vec<_>>();
+        let label_ys = spread_labels(&desired_ys, 10.0, p_top + 5.0, p_bot - 5.0);
+        for ((x, y, label, color), label_y) in end_labels.into_iter().zip(label_ys) {
+            polyline(
+                &area,
+                &[(x + 3.0, y), (x_right + 6.0, label_y)],
+                color,
+                1,
+                0.6,
+                false,
+            )?;
+            text(
+                &area,
+                label,
+                px(x_right + 8.0),
+                px(label_y),
+                8,
+                color,
+                HPos::Left,
+                true,
+            )?;
         }
     }
     vtext(
@@ -2394,6 +2408,47 @@ fn small_points(
         .collect()
 }
 
+fn spread_labels(ys: &[f64], gap: f64, top: f64, bottom: f64) -> Vec<f64> {
+    // Remove the required spacing, then merge groups whose centers would
+    // overlap. Crowded labels stay centered around their curve endpoints.
+    let mut groups: Vec<(f64, usize)> = Vec::new();
+    for (i, &y) in ys.iter().enumerate() {
+        groups.push((y - i as f64 * gap, 1));
+        while groups.len() > 1 {
+            let last = groups.len() - 1;
+            let (left_sum, left_count) = groups[last - 1];
+            let (right_sum, right_count) = groups[last];
+            if left_sum / left_count as f64 <= right_sum / right_count as f64 {
+                break;
+            }
+            groups[last - 1] = (left_sum + right_sum, left_count + right_count);
+            groups.pop();
+        }
+    }
+    let max_start = bottom - gap * ys.len().saturating_sub(1) as f64;
+    let mut positions = Vec::with_capacity(ys.len());
+    for (sum, count) in groups {
+        let start = (sum / count as f64).clamp(top, max_start);
+        for _ in 0..count {
+            positions.push(start + positions.len() as f64 * gap);
+        }
+    }
+    positions
+}
+
+fn small_endpoint_levels(rows: &[BenchRow], prefix: &str, levels: &[i32]) -> Option<(i32, i32)> {
+    SMALL_SUFFIXES.iter().rev().find_map(|suffix| {
+        let name = format!("{prefix}{suffix}");
+        let values = levels
+            .iter()
+            .filter_map(|&level| get_mbs(rows, &name, level).map(|mbs| (level, mbs)))
+            .collect::<Vec<_>>();
+        let fastest = values.iter().max_by(|a, b| a.1.total_cmp(&b.1))?.0;
+        let slowest = values.iter().min_by(|a, b| a.1.total_cmp(&b.1))?.0;
+        Some((fastest, slowest))
+    })
+}
+
 fn band_envelope(
     rows: &[BenchRow],
     prefix: &str,
@@ -2432,5 +2487,32 @@ mod tests {
     #[test]
     fn scatter_level_label_keeps_zstd_levels() {
         assert_eq!(fmt_scatter_level("C zstd", LEVEL), "L1");
+    }
+
+    #[test]
+    fn small_endpoint_labels_follow_measured_speed() {
+        let rows =
+            [(-7, 10e6), (-6, 8e6), (3, 20e6), (4, 15e6)].map(|(level, compress_ns)| BenchRow {
+                input: "x-ray_1m".into(),
+                level,
+                input_size: 1 << 20,
+                compressed_size: 1 << 19,
+                compress_ns,
+                decompress_ns: 1e6,
+            });
+        assert_eq!(
+            small_endpoint_levels(&rows, "x-ray", &[-7, -6, 3, 4]),
+            Some((-6, 3))
+        );
+    }
+
+    #[test]
+    fn crowded_labels_stay_centered_and_inside_the_panel() {
+        let ys = [100.0, 101.0, 102.0];
+        assert_eq!(
+            spread_labels(&ys, 10.0, 0.0, 200.0),
+            vec![91.0, 101.0, 111.0]
+        );
+        assert_eq!(spread_labels(&ys, 10.0, 0.0, 30.0), vec![10.0, 20.0, 30.0]);
     }
 }

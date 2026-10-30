@@ -80,14 +80,18 @@ pub fn level_params(level: i32) -> Option<LevelParams> {
 /// Returns the compression parameters for a given level, sized for `src_len`.
 ///
 /// Uses fixed parameters per level with log values clamped down for small inputs.
-/// L3 keeps a denser search through 256 KiB to preserve short-input matches.
+/// L3 and L4 keep denser searches through 256 KiB to preserve matches on short inputs.
 ///
 /// Level 0 is treated as "library default" and maps to level 1.
 pub fn level_params_for_size(level: i32, src_len: usize) -> Option<LevelParams> {
     let mut params = level_params_inner(level)?;
     // Sparse initial tables cost too much ratio on inputs of up to two blocks.
-    if level == 3 && src_len <= 256 * 1024 {
-        params.search_strength = 4;
+    if src_len <= 256 * 1024 {
+        params.search_strength = match level {
+            3 => 4,
+            4 => 6,
+            _ => params.search_strength,
+        };
     }
     params.hash_log = params.hash_log.clamp(HASH_LOG_MIN, HASH_LOG_MAX);
     params.chain_log = params.chain_log.clamp(HASH_LOG_MIN, HASH_LOG_MAX);
@@ -348,7 +352,8 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
-        // C zstd's level 4 tables, with a 16 MiB window.
+        // C zstd's level 4 tables, with a 16 MiB window and faster skip
+        // growth on large inputs.
         4 => LevelParams {
             strategy: Strategy::DFast,
             window_log: 24,
@@ -357,7 +362,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 5,
             target_length: 1,
-            search_strength: 6,
+            search_strength: 3,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,

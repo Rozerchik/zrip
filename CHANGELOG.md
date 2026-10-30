@@ -8,6 +8,8 @@
   inputs, with slightly lower compression ratios.
 - Further tune L1, L2, and L3 for faster encoding of low-compressibility
   inputs, trading more compression ratio for throughput.
+- Retune L4 for faster encoding above 256 KiB, preserving its denser
+  search on smaller inputs.
 
 ### Fixed
 
@@ -28,6 +30,8 @@
   decoding with the dictionary's table, so valid frames failed with
   `CorruptSequences` or returned wrong bytes. Only dictionaries with their
   own sequence tables were affected, such as those from `zstd --train`.
+- Correct endpoint level labels in `small_encode.svg` and prevent
+  overlapping labels.
 
 ## [0.8.13] - 2026-10-20
 
