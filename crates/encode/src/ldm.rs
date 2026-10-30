@@ -470,7 +470,13 @@ impl LdmState {
         }
     }
 
-    fn generate_sequences(&mut self, combined: &[u8], scan_start: usize, scan_end: usize) {
+    fn generate_sequences(
+        &mut self,
+        combined: &[u8],
+        scan_start: usize,
+        scan_end: usize,
+        window_size: usize,
+    ) {
         self.raw_sequences.clear();
         let min_match = self.params.min_match_length as usize;
         let h_bits = self.h_bits();
@@ -528,7 +534,7 @@ impl LdmState {
                         continue;
                     }
                     let match_pos = cur.offset as usize;
-                    if match_pos >= split {
+                    if match_pos >= split || split - match_pos > window_size {
                         continue;
                     }
 
@@ -640,7 +646,7 @@ impl LdmState {
             }
             return;
         }
-        self.generate_sequences(src, block_start, block_end);
+        self.generate_sequences(src, block_start, block_end, 1 << params.window_log);
 
         if self.raw_sequences.is_empty() {
             match params.strategy {
@@ -763,3 +769,46 @@ impl LdmState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINDOW: usize = 1 << 12;
+
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        (0..len as u64)
+            .map(|i| xxh64(&i.to_le_bytes(), seed) as u8)
+            .collect()
+    }
+
+    /// Feeds `pattern, gap, pattern` through LDM and returns the sequences
+    /// found for the final repeat.
+    fn find_repeat(gap: usize, window: usize) -> Vec<RawLdmSeq> {
+        let params = LdmParams {
+            hash_log: 12,
+            bucket_size_log: 2,
+            min_match_length: 32,
+            hash_rate_log: 1,
+        };
+        let pattern = noise(WINDOW / 2, 1);
+        let src = [&pattern[..], &noise(gap, 2), &pattern].concat();
+        let repeat_start = pattern.len() + gap;
+
+        let mut ldm = LdmState::new(&params);
+        ldm.fill_only(&src, 0, repeat_start);
+        ldm.generate_sequences(&src, repeat_start, src.len(), window);
+        ldm.raw_sequences
+    }
+
+    #[test]
+    fn matches_within_window_are_found() {
+        assert!(!find_repeat(WINDOW / 2, WINDOW).is_empty());
+    }
+
+    #[test]
+    fn matches_beyond_window_are_rejected() {
+        assert!(find_repeat(WINDOW * 2, WINDOW).is_empty());
+    }
+}
+
