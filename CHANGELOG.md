@@ -2,20 +2,27 @@
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-10-31
+
 ### Changed
 
-- Retune L-3, L-2, L-1, and L1 for faster encoding of low-compressibility
-  inputs, with slightly lower compression ratios.
-- Further tune L1, L2, and L3 for faster encoding of low-compressibility
-  inputs, trading more compression ratio for throughput.
-- Retune L4 for faster encoding above 256 KiB, preserving its denser
-  search on smaller inputs.
+- Retune L-3 through L4 for faster encoding of low-compressibility inputs,
+  at some cost in ratio. On `sao` and `x-ray`, L-3 to L-1 encode 21% to 29%
+  faster with ratios about 0.5% lower. L1 to L4 encode 21% to 66% faster
+  with ratios 3.5% to 4.6% lower.
+- One-shot calls and `CompressContext` keep the denser L3 and L4 search for
+  inputs up to 256 KiB. `FrameEncoder` does not know its input size and
+  always uses the sparser search, so short streams at those levels can come
+  out up to about 16% larger than one-shot frames.
+- Bump the JSR and npm packages to `0.5.16`.
 
 ### Fixed
 
-- The npm package export gains a `default` condition, so
-  `require.resolve("@paddor/zrip")` finds the entry and the WASM files
-  next to it. Bump the npm package to `0.5.15`.
+- `DecompressContext::with_dict` and `FrameDecoder::with_dict` load the
+  predefined sequence table when a block selects Predefined_Mode. They kept
+  decoding with the dictionary's table, so valid frames failed with
+  `CorruptSequences` or returned wrong bytes. Only dictionaries with their
+  own sequence tables were affected, such as those from `zstd --train`.
 - LDM no longer emits offsets past the window a frame advertises. This hit
   streaming with a repeat 1 to 2 windows back, and one-shot frames past
   128 MiB. Those frames could fail in `FrameDecoder` and C zstd.
@@ -25,11 +32,9 @@
 - Custom `LevelParams` with `hash_log` 14 and `min_match` 4 now honor
   `window_log`. They used a fixed 512 KiB distance, which could pass the
   advertised window.
-- `DecompressContext::with_dict` and `FrameDecoder::with_dict` load the
-  predefined sequence table when a block selects Predefined_Mode. They kept
-  decoding with the dictionary's table, so valid frames failed with
-  `CorruptSequences` or returned wrong bytes. Only dictionaries with their
-  own sequence tables were affected, such as those from `zstd --train`.
+- The npm package export gains a `default` condition, so
+  `require.resolve("@paddor/zrip")` finds the entry and the WASM files
+  next to it. Bump the npm package to `0.5.15`.
 - Correct endpoint level labels in `small_encode.svg` and prevent
   overlapping labels.
 

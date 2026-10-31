@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-31
+
 - Retune L-3, L-2, L-1, and L1 to search less in long literal runs. This
   speeds up low-compressibility inputs with slightly lower compression
   ratios.
@@ -11,6 +13,19 @@
   cost of compression ratio.
 - L4 uses faster search-step growth above 256 KiB for better throughput
   on low-compressibility inputs. Smaller inputs keep the denser search.
+- The 256 KiB cutoff for L3 and L4 counts the input, not a dictionary, and
+  applies to one-shot calls and `CompressContext`. `FrameEncoder` does not
+  know its input size and always uses the sparser search, so short streams
+  at those levels can come out up to about 16% larger than one-shot frames.
+- LDM no longer emits offsets past the window a frame advertises. This hit
+  streaming with a repeat 1 to 2 windows back, and one-shot frames past
+  128 MiB. Those frames could fail in `FrameDecoder` and C zstd.
+- Blocks no longer exceed the frame's window. `FrameEncoder` at `window_log`
+  below 17, and one-shot frames past 128 MiB at such a `window_log`, cut
+  128 KiB blocks that C zstd rejected.
+- Custom `LevelParams` with `hash_log` 14 and `min_match` 4 now honor
+  `window_log`. They used a fixed 512 KiB distance, which could pass the
+  advertised window.
 
 ## [0.9.2] - 2026-10-20
 
