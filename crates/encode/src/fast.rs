@@ -708,11 +708,7 @@ fn fast_block_generic<const HASH_LOG: u32, const MLS: usize, const DICT: bool>(
         search_strength
     };
     let ilimit = (block_end - MLS).min(src.len() - 8);
-    let max_distance = if HASH_LOG == 14 && MLS == 4 {
-        1usize << 19
-    } else {
-        1usize << params.window_log
-    };
+    let max_distance = 1usize << params.window_log;
 
     let mut rep1 = rep_offsets[0] as usize;
     let mut rep2 = rep_offsets[1] as usize;
@@ -1225,5 +1221,56 @@ mod tests {
         );
 
         assert_ne!(sequences.len(), 0);
+    }
+
+    /// Offsets found for `pattern, run of one byte, pattern` by the
+    /// `hash_log` 14, MLS 4 specialization. The run hashes to one slot, so
+    /// the first pattern's entries survive any distance.
+    fn h14_mls4_offsets(distance: usize, window_log: u32) -> Vec<u32> {
+        let mut x = 1u32;
+        let pattern: Vec<u8> = (0..4096)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x >> 24) as u8
+            })
+            .collect();
+        let mut src = pattern.clone();
+        src.resize(distance, 0);
+        src.extend_from_slice(&pattern);
+
+        let mut params = crate::strategy::level_params(1).unwrap();
+        params.hash_log = 14;
+        params.min_match = 4;
+        params.window_log = window_log;
+        let mut hash_table = vec![0u32; 1usize << 14];
+        let mut sequences = Vec::new();
+        compress_fast_block(
+            &src,
+            0,
+            src.len(),
+            &params,
+            &[1, 4, 8],
+            &mut hash_table,
+            &mut sequences,
+        );
+        sequences.iter().map(|s| s.offset).collect()
+    }
+
+    #[test]
+    fn h14_mls4_honors_smaller_window() {
+        const DISTANCE: usize = 400 << 10;
+        let wide = h14_mls4_offsets(DISTANCE, 19);
+        assert!(wide.contains(&(DISTANCE as u32)), "{wide:?}");
+        let narrow = h14_mls4_offsets(DISTANCE, 18);
+        assert!(narrow.iter().all(|&o| o <= 1 << 18), "{narrow:?}");
+    }
+
+    #[test]
+    fn h14_mls4_honors_larger_window() {
+        const DISTANCE: usize = 600 << 10;
+        let offsets = h14_mls4_offsets(DISTANCE, 20);
+        assert!(offsets.contains(&(DISTANCE as u32)), "{offsets:?}");
     }
 }
