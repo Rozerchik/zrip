@@ -7,6 +7,15 @@
 - The npm package export gains a `default` condition, so
   `require.resolve("@paddor/zrip")` finds the entry and the WASM files
   next to it. Bump the npm package to `0.5.15`.
+- LDM no longer emits offsets past the window a frame advertises. This hit
+  streaming with a repeat 1 to 2 windows back, and one-shot frames past
+  128 MiB. Those frames could fail in `FrameDecoder` and C zstd.
+- Blocks no longer exceed the frame's window. `FrameEncoder` at `window_log`
+  below 17, and one-shot frames past 128 MiB at such a `window_log`, cut
+  128 KiB blocks that C zstd rejected.
+- Custom `LevelParams` with `hash_log` 14 and `min_match` 4 now honor
+  `window_log`. They used a fixed 512 KiB distance, which could pass the
+  advertised window.
 
 ## [0.8.13] - 2026-10-20
 
