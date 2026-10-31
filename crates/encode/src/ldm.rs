@@ -787,8 +787,9 @@ mod tests {
     /// Feeds `pattern, gap, pattern` through LDM and returns the sequences
     /// found for the final repeat.
     fn find_repeat(gap: usize, window: usize) -> Vec<RawLdmSeq> {
+        // Enough slots that no entry of the pattern gets evicted.
         let params = LdmParams {
-            hash_log: 12,
+            hash_log: 16,
             bucket_size_log: 2,
             min_match_length: 32,
             hash_rate_log: 1,
@@ -805,7 +806,9 @@ mod tests {
 
     #[test]
     fn matches_within_window_are_found() {
-        assert!(!find_repeat(WINDOW / 2, WINDOW).is_empty());
+        let found = find_repeat(WINDOW / 2, WINDOW);
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|s| s.offset == WINDOW as u32));
     }
 
     #[test]
@@ -813,6 +816,11 @@ mod tests {
         // One byte past the window, through the 2x the encoder keeps, and on.
         for distance in [WINDOW + 1, WINDOW * 3 / 2, WINDOW * 2, WINDOW * 5 / 2] {
             let gap = distance - WINDOW / 2;
+            let found = find_repeat(gap, distance);
+            assert!(
+                found.iter().all(|s| s.offset as usize == distance) && !found.is_empty(),
+                "control: distance {distance}"
+            );
             assert!(find_repeat(gap, WINDOW).is_empty(), "distance {distance}");
         }
     }
