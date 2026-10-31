@@ -573,6 +573,7 @@ impl LdmState {
                 let match_ref = best_match_pos - best_back;
                 let match_length = best_fwd + best_back;
                 let offset = (match_start - match_ref) as u32;
+                debug_assert!(offset as usize <= window_size);
 
                 self.raw_sequences.push(RawLdmSeq {
                     lit_length: (match_start - anchor) as u32,
