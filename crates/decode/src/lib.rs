@@ -113,21 +113,7 @@ impl BlockDecodeWorkspace {
     #[cfg(feature = "alloc")]
     pub(crate) fn cache_dict(&mut self, dict: &zrip_core::dict::Dictionary) {
         let mut st = SequenceDecodeTables::new_default();
-        if let Some((t, l)) = dict.of_table() {
-            st.of_table = crate::seq_table::SeqTable::promote_of(t);
-            st.of_accuracy = l;
-            st.of_set = true;
-        }
-        if let Some((t, l)) = dict.ml_table() {
-            st.ml_table = crate::seq_table::SeqTable::promote_ml(t);
-            st.ml_accuracy = l;
-            st.ml_set = true;
-        }
-        if let Some((t, l)) = dict.ll_table() {
-            st.ll_table = crate::seq_table::SeqTable::promote_ll(t);
-            st.ll_accuracy = l;
-            st.ll_set = true;
-        }
+        st.load_dict(dict);
         self.cached_dict_tables = Some(Box::new(st));
         self.cached_dict_rep = *dict.rep_offsets();
         if let Some((t, l)) = dict.huf_table() {
@@ -463,24 +449,7 @@ fn initial_sequence_state(
     } else if let Some(d) = dict {
         tables.reset_default();
         ws.seq_tables_replaced();
-        if let Some((t, l)) = d.of_table() {
-            tables.of_table = crate::seq_table::SeqTable::promote_of(t);
-            tables.of_accuracy = l;
-            tables.of_kind = crate::sequences::SequenceTableKind::Other;
-            tables.of_set = true;
-        }
-        if let Some((t, l)) = d.ml_table() {
-            tables.ml_table = crate::seq_table::SeqTable::promote_ml(t);
-            tables.ml_accuracy = l;
-            tables.ml_kind = crate::sequences::SequenceTableKind::Other;
-            tables.ml_set = true;
-        }
-        if let Some((t, l)) = d.ll_table() {
-            tables.ll_table = crate::seq_table::SeqTable::promote_ll(t);
-            tables.ll_accuracy = l;
-            tables.ll_kind = crate::sequences::SequenceTableKind::Other;
-            tables.ll_set = true;
-        }
+        tables.load_dict(d);
         *d.rep_offsets()
     } else {
         tables.clear_repeat_flags();

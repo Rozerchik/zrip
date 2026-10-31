@@ -53,6 +53,12 @@ fn ignore_unused_frame_descriptor_bit() {
 /// section's mode byte inside the first compressed block. Panics if the first
 /// block is not a compressed block or has zero sequences.
 fn mode_byte_offset(compressed: &[u8]) -> usize {
+    first_block_mode_byte(compressed).expect("first block has no mode byte")
+}
+
+/// Same as `mode_byte_offset`, but returns `None` if the first block is not a
+/// compressed block or has zero sequences.
+fn first_block_mode_byte(compressed: &[u8]) -> Option<usize> {
     assert_eq!(
         &compressed[..4],
         &[0x28, 0xB5, 0x2F, 0xFD],
@@ -86,7 +92,9 @@ fn mode_byte_offset(compressed: &[u8]) -> usize {
         | ((compressed[off + 1] as u32) << 8)
         | ((compressed[off + 2] as u32) << 16);
     let block_type = (bh >> 1) & 0x03;
-    assert_eq!(block_type, 2, "first block is not compressed");
+    if block_type != 2 {
+        return None;
+    }
     off += 3;
 
     // Literals section header
@@ -114,7 +122,9 @@ fn mode_byte_offset(compressed: &[u8]) -> usize {
 
     // Sequence count
     let b0 = compressed[off];
-    assert!(b0 != 0, "block has 0 sequences, no mode byte");
+    if b0 == 0 {
+        return None;
+    }
     off += if (b0 as usize) < 128 {
         1
     } else if (b0 as usize) < 255 {
@@ -123,7 +133,7 @@ fn mode_byte_offset(compressed: &[u8]) -> usize {
         3
     };
 
-    off
+    Some(off)
 }
 
 fn raw_rle_size(data: &[u8], off: usize, size_fmt: u8) -> (usize, usize) {
@@ -708,5 +718,157 @@ fn streaming_valid_frames_unaffected() {
         dec.read_to_end(&mut out)
             .unwrap_or_else(|e| panic!("level {level}: {e}"));
         assert_eq!(out, data, "level {level}");
+    }
+}
+
+// ===== Predefined_Mode with a dictionary =====
+
+/// Small protobuf-style records. A dictionary trained on them gets its own
+/// sequence tables, and encoders often prefer the predefined ones for a record
+/// this short.
+#[cfg(feature = "std")]
+fn protobuf_records(count: usize) -> Vec<Vec<u8>> {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut rand = move |n: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % n
+    };
+    let varint = |out: &mut Vec<u8>, mut v: u64| {
+        while v >= 0x80 {
+            out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    };
+    let symbols: Vec<Vec<u8>> = (0..500)
+        .map(|_| (0..2 + rand(3)).map(|_| b'A' + rand(26) as u8).collect())
+        .collect();
+    let exchanges: [&[u8]; 6] = [b"XNAS", b"XNYS", b"ARCX", b"BATS", b"IEXG", b"EDGX"];
+
+    (0..count as u64)
+        .map(|i| {
+            let symbol = &symbols[(rand(1000).pow(3) * 500 / 1_000_000_000) as usize];
+            let bid = (500 + rand(49_500)) as f64 / 100.0;
+            let mut record = vec![0x0a, symbol.len() as u8];
+            record.extend_from_slice(symbol);
+            record.extend_from_slice(&[0x12, 4]);
+            record.extend_from_slice(exchanges[rand(6) as usize]);
+            record.push(0x19);
+            record.extend_from_slice(&bid.to_le_bytes());
+            record.push(0x21);
+            record.extend_from_slice(&(bid + (1 + rand(20)) as f64 / 100.0).to_le_bytes());
+            record.push(0x28);
+            varint(&mut record, (1 + rand(50)) * 100);
+            record.push(0x30);
+            varint(&mut record, (1 + rand(50)) * 100);
+            record.push(0x38);
+            varint(
+                &mut record,
+                1_790_000_000_000_000_000 + (i + 1) * 1_000_000 + rand(1_000_000),
+            );
+            record
+        })
+        .collect()
+}
+
+/// Trains a dictionary with C zstd. zrip's trainer stores the predefined
+/// sequence tables, which hides a decoder that keeps the dictionary's table.
+#[cfg(feature = "std")]
+fn trained_dict_and_records() -> (Vec<u8>, Vec<Vec<u8>>) {
+    const TRAIN: usize = 5_000;
+    const TEST: usize = 1_000;
+
+    let mut records = protobuf_records(TRAIN + TEST);
+    let test = records.split_off(TRAIN);
+    (zstd::dict::from_samples(&records, 8192).unwrap(), test)
+}
+
+/// A block can leave the dictionary's sequence tables for the predefined ones.
+/// Every decode path must then load the predefined table. Decoding with the
+/// dictionary's table fails, or returns wrong bytes with no error.
+#[cfg(feature = "std")]
+fn assert_dict_paths_decode(frames: &[Vec<u8>], records: &[Vec<u8>], dict_bytes: &[u8]) {
+    use std::io::Read;
+
+    const LIMIT: usize = 1 << 20;
+
+    fn check<E: core::fmt::Debug>(path: &str, i: usize, decoded: Result<&[u8], E>, want: &[u8]) {
+        match decoded {
+            Ok(got) => assert_eq!(got, want, "{path}: frame {i} decoded to wrong bytes"),
+            Err(e) => panic!("{path}: frame {i} failed: {e:?}"),
+        }
+    }
+
+    let uses_predefined_table = |frame: &[u8]| {
+        first_block_mode_byte(frame).is_some_and(|off| {
+            [6, 4, 2].iter().any(|shift| {
+                let mode = (frame[off] >> shift) & 3;
+                mode == 0
+            })
+        })
+    };
+    assert!(
+        frames.iter().any(|frame| uses_predefined_table(frame)),
+        "no frame selects Predefined_Mode, so this test proves nothing"
+    );
+
+    let dict = zrip::Dictionary::from_bytes(dict_bytes).unwrap();
+    let mut c_decoder = zstd::bulk::Decompressor::with_dictionary(dict_bytes).unwrap();
+    let mut context = zrip::DecompressContext::with_dict(dict.clone());
+    let mut streaming = zrip::FrameDecoder::with_dict(&[][..], dict.clone());
+    let mut out = Vec::new();
+
+    for (i, (frame, want)) in frames.iter().zip(records).enumerate() {
+        // C zstd and the one-shot path show the frame itself is fine.
+        let decoded = c_decoder.decompress(frame, LIMIT);
+        check("C zstd", i, decoded.as_deref(), want);
+        let decoded = zrip::decompress_with_dict_and_limit(frame, &dict, LIMIT);
+        check("one-shot", i, decoded.as_deref(), want);
+
+        let decoded = context.decompress_with_limit(frame, LIMIT);
+        check("reused context", i, decoded.as_deref(), want);
+        let mut fresh = zrip::DecompressContext::with_dict(dict.clone());
+        let decoded = fresh.decompress_with_limit(frame, LIMIT);
+        check("fresh context", i, decoded.as_deref(), want);
+
+        out.clear();
+        streaming.reset(frame.as_slice());
+        let decoded = streaming.read_to_end(&mut out).map(|_| out.as_slice());
+        check("reused streaming", i, decoded, want);
+        out.clear();
+        let decoded = zrip::FrameDecoder::with_dict(frame.as_slice(), dict.clone())
+            .read_to_end(&mut out)
+            .map(|_| out.as_slice());
+        check("fresh streaming", i, decoded, want);
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn predefined_mode_replaces_dictionary_tables_in_c_frames() {
+    let (dict_bytes, records) = trained_dict_and_records();
+    for level in [1, 3] {
+        let mut encoder = zstd::bulk::Compressor::with_dictionary(level, &dict_bytes).unwrap();
+        let frames: Vec<Vec<u8>> = records
+            .iter()
+            .map(|record| encoder.compress(record).unwrap())
+            .collect();
+        assert_dict_paths_decode(&frames, &records, &dict_bytes);
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn predefined_mode_replaces_dictionary_tables_in_zrip_frames() {
+    let (dict_bytes, records) = trained_dict_and_records();
+    let dict = zrip::Dictionary::from_bytes(&dict_bytes).unwrap();
+    for level in [1, 3] {
+        let frames: Vec<Vec<u8>> = records
+            .iter()
+            .map(|record| zrip::compress_with_dict(record, level, &dict).unwrap())
+            .collect();
+        assert_dict_paths_decode(&frames, &records, &dict_bytes);
     }
 }

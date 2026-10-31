@@ -310,21 +310,7 @@ impl<R: Read> FrameDecoder<R> {
             self.rep_offsets = *d.rep_offsets();
             self.decode_history.extend_from_slice(d.content());
             let mut st = SequenceDecodeTables::new_default();
-            if let Some((t, l)) = d.of_table() {
-                st.of_table = crate::seq_table::SeqTable::promote_of(t);
-                st.of_accuracy = l;
-                st.of_set = true;
-            }
-            if let Some((t, l)) = d.ml_table() {
-                st.ml_table = crate::seq_table::SeqTable::promote_ml(t);
-                st.ml_accuracy = l;
-                st.ml_set = true;
-            }
-            if let Some((t, l)) = d.ll_table() {
-                st.ll_table = crate::seq_table::SeqTable::promote_ll(t);
-                st.ll_accuracy = l;
-                st.ll_set = true;
-            }
+            st.load_dict(d);
             self.seq_tables = st;
             self.ws.seq_tables_replaced();
             self.ws.reset_huffman_state();

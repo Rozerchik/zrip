@@ -179,6 +179,29 @@ impl SequenceDecodeTables {
         self.of_set = false;
         self.ml_set = false;
     }
+
+    /// Installs the sequence tables `dict` carries. Marks them as not
+    /// predefined, so Predefined_Mode reloads the predefined table.
+    pub(crate) fn load_dict(&mut self, dict: &zrip_core::dict::Dictionary) {
+        if let Some((t, l)) = dict.of_table() {
+            self.of_table = SeqTable::promote_of(t);
+            self.of_accuracy = l;
+            self.of_kind = SequenceTableKind::Other;
+            self.of_set = true;
+        }
+        if let Some((t, l)) = dict.ml_table() {
+            self.ml_table = SeqTable::promote_ml(t);
+            self.ml_accuracy = l;
+            self.ml_kind = SequenceTableKind::Other;
+            self.ml_set = true;
+        }
+        if let Some((t, l)) = dict.ll_table() {
+            self.ll_table = SeqTable::promote_ll(t);
+            self.ll_accuracy = l;
+            self.ll_kind = SequenceTableKind::Other;
+            self.ll_set = true;
+        }
+    }
 }
 
 pub(crate) fn parse_sequence_count(data: &[u8]) -> Result<(u32, usize), DecompressError> {

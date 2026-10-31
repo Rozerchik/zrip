@@ -16,6 +16,11 @@
 - Custom `LevelParams` with `hash_log` 14 and `min_match` 4 now honor
   `window_log`. They used a fixed 512 KiB distance, which could pass the
   advertised window.
+- `DecompressContext::with_dict` and `FrameDecoder::with_dict` load the
+  predefined sequence table when a block selects Predefined_Mode. They kept
+  decoding with the dictionary's table, so valid frames failed with
+  `CorruptSequences` or returned wrong bytes. Only dictionaries with their
+  own sequence tables were affected, such as those from `zstd --train`.
 
 ## [0.8.13] - 2026-10-20
 
