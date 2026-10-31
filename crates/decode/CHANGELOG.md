@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-10-31
+
 - `DecompressContext::with_dict` and `FrameDecoder::with_dict` load the
   predefined sequence table when a block selects Predefined_Mode. They kept
   decoding with the dictionary's table, so valid frames failed with
