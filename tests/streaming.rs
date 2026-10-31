@@ -844,6 +844,44 @@ fn streaming_encoder_decoder_multiblock_large() {
 // ===== Options API (large window / LDM) =====
 
 #[test]
+fn streaming_small_window_blocks_fit_window() {
+    use std::io::Write;
+    // The spec caps blocks at min(window, 128 KiB). C zstd enforces it.
+    let data: Vec<u8> = b"small window streaming test "
+        .iter()
+        .cycle()
+        .take(3 * BLOCK)
+        .copied()
+        .collect();
+    for window_log in [10, 12, 14, 16, 17] {
+        for level in [-7, 1, 4] {
+            let opts = zrip::Options::default().window_log(window_log);
+            let mut encoder = zrip::FrameEncoder::with_options(Vec::new(), level, &opts).unwrap();
+            encoder.write_all(&data).unwrap();
+            let compressed = encoder.finish().unwrap();
+            assert_eq!(
+                zstd::decode_all(&compressed[..]).unwrap(),
+                data,
+                "window_log {window_log} level {level}"
+            );
+            assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+        }
+    }
+}
+
+#[test]
+fn one_shot_small_window_blocks_fit_window() {
+    // Only frames past 128 MiB advertise `window_log`.
+    let data = vec![7u8; zrip::frame::MAX_WINDOW_SIZE as usize + 1];
+    let params = zrip::encode::strategy::level_params(1)
+        .unwrap()
+        .with_window_log(16);
+    let compressed = zrip::compress_with_params(&data, &params).unwrap();
+    assert_eq!(zstd::decode_all(&compressed[..]).unwrap(), data);
+    assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+}
+
+#[test]
 fn options_window_log_only() {
     assert!(zrip::compress(b"hello", 5).is_err());
 }
@@ -1112,5 +1150,24 @@ mod ldm {
         );
         assert_eq!(zrip::decompress(&ldm).unwrap(), data);
         assert_eq!(zstd::decode_all(&ldm[..]).unwrap(), data);
+    }
+
+    #[test]
+    fn streaming_ldm_small_window_blocks_fit_window() {
+        use std::io::Write;
+        let part = letters(BLOCK, 2);
+        let data = [&part[..], &part, &part].concat();
+        for window_log in [10, 12, 14, 16, 17] {
+            let opts = zrip::Options::default().window_log(window_log).ldm(true);
+            let mut encoder = zrip::FrameEncoder::with_options(Vec::new(), 1, &opts).unwrap();
+            encoder.write_all(&data).unwrap();
+            let compressed = encoder.finish().unwrap();
+            assert_eq!(
+                zstd::decode_all(&compressed[..]).unwrap(),
+                data,
+                "window_log {window_log}"
+            );
+            assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+        }
     }
 }

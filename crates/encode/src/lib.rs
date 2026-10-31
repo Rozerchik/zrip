@@ -161,7 +161,6 @@ fn fits_single_segment(content_size: usize) -> bool {
 }
 
 /// The window a frame without a dictionary advertises for `content_size` bytes.
-#[cfg_attr(not(feature = "ldm"), allow(dead_code))]
 fn frame_window_size(content_size: usize, window_log: u32) -> usize {
     if fits_single_segment(content_size) {
         content_size
@@ -308,15 +307,15 @@ fn compress_frame(
 
         #[cfg(feature = "ldm")]
         let mut ldm_state = params.ldm_params.as_ref().map(ldm::LdmState::new);
-        #[cfg(feature = "ldm")]
         let window_size = frame_window_size(input.len(), params.window_log);
+        let block_size = MAX_BLOCK_SIZE.min(window_size);
 
         match params.strategy {
             Strategy::Fast => {
                 let hash_size = 1usize << params.hash_log;
                 let mut hash_table = vec![0u32; hash_size];
                 while offset < input.len() {
-                    let chunk_size = (input.len() - offset).min(MAX_BLOCK_SIZE);
+                    let chunk_size = (input.len() - offset).min(block_size);
                     let block_end = offset + chunk_size;
                     let is_last = block_end >= input.len();
                     let block = &input[offset..block_end];
@@ -386,7 +385,7 @@ fn compress_frame(
                 let mut hash_short = vec![0u32; short_size];
                 let mut hash_long = vec![0u32; long_size];
                 while offset < input.len() {
-                    let chunk_size = (input.len() - offset).min(MAX_BLOCK_SIZE);
+                    let chunk_size = (input.len() - offset).min(block_size);
                     let block_end = offset + chunk_size;
                     let is_last = block_end >= input.len();
                     let block = &input[offset..block_end];

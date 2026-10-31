@@ -24,8 +24,8 @@ enum EncoderState {
 
 /// Streaming zstd compressor implementing [`Write`].
 ///
-/// Buffers input until a full block (128 KiB) is ready, then compresses
-/// and writes it to the underlying writer. Call [`finish`](Self::finish)
+/// Buffers input until a full block (128 KiB, or the window if smaller) is
+/// ready, then compresses and writes it to the underlying writer. Call [`finish`](Self::finish)
 /// to flush the final block, write the content checksum, and recover the
 /// writer.
 ///
@@ -383,14 +383,15 @@ impl<W: Write> Write for FrameEncoder<W> {
 
         self.hasher.update(buf);
 
+        let block_size = MAX_BLOCK_SIZE.min(1usize << self.params.window_log);
         let mut consumed = 0;
         while consumed < buf.len() {
-            let space = MAX_BLOCK_SIZE - self.buffer.len();
+            let space = block_size - self.buffer.len();
             let n = space.min(buf.len() - consumed);
             self.buffer.extend_from_slice(&buf[consumed..consumed + n]);
             consumed += n;
 
-            if self.buffer.len() >= MAX_BLOCK_SIZE {
+            if self.buffer.len() >= block_size {
                 self.flush_block(false)?;
             }
         }
