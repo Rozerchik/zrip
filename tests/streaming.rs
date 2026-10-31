@@ -844,6 +844,44 @@ fn streaming_encoder_decoder_multiblock_large() {
 // ===== Options API (large window / LDM) =====
 
 #[test]
+fn streaming_small_window_blocks_fit_window() {
+    use std::io::Write;
+    // The spec caps blocks at min(window, 128 KiB). C zstd enforces it.
+    let data: Vec<u8> = b"small window streaming test "
+        .iter()
+        .cycle()
+        .take(3 * BLOCK)
+        .copied()
+        .collect();
+    for window_log in [10, 12, 14, 16, 17] {
+        for level in [-7, 1, 4] {
+            let opts = zrip::Options::default().window_log(window_log);
+            let mut encoder = zrip::FrameEncoder::with_options(Vec::new(), level, &opts).unwrap();
+            encoder.write_all(&data).unwrap();
+            let compressed = encoder.finish().unwrap();
+            assert_eq!(
+                zstd::decode_all(&compressed[..]).unwrap(),
+                data,
+                "window_log {window_log} level {level}"
+            );
+            assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+        }
+    }
+}
+
+#[test]
+fn one_shot_small_window_blocks_fit_window() {
+    // Only frames past 128 MiB advertise `window_log`.
+    let data = vec![7u8; zrip::frame::MAX_WINDOW_SIZE as usize + 1];
+    let params = zrip::encode::strategy::level_params(1)
+        .unwrap()
+        .with_window_log(16);
+    let compressed = zrip::compress_with_params(&data, &params).unwrap();
+    assert_eq!(zstd::decode_all(&compressed[..]).unwrap(), data);
+    assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+}
+
+#[test]
 fn options_window_log_only() {
     assert!(zrip::compress(b"hello", 5).is_err());
 }
@@ -1076,5 +1114,97 @@ mod ldm {
         let compressed = zrip::compress_with_params(&data, &params).unwrap();
         let decompressed = zrip::decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    /// Pseudo-random bytes from 16 letters: compressible, so they reach the
+    /// match finders, but free of repeats of their own.
+    fn letters(len: usize, seed: u32) -> Vec<u8> {
+        let mut x = seed;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                b'a' + (x >> 28) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_shot_ldm_reaches_whole_single_segment_window() {
+        // A single-segment frame's window is its content size, whatever
+        // `window_log` the match finder uses.
+        let part = letters(4 << 17, 1);
+        let data = [&part[..], &part].concat();
+
+        let opts_no_ldm = zrip::Options::default().window_log(17);
+        let no_ldm = zrip::compress_opts(&data, 1, &opts_no_ldm).unwrap();
+        let opts_ldm = zrip::Options::default().window_log(17).ldm(true);
+        let ldm = zrip::compress_opts(&data, 1, &opts_ldm).unwrap();
+
+        assert!(
+            ldm.len() < no_ldm.len() * 3 / 4,
+            "LDM should find the repeat: ldm={} no_ldm={}",
+            ldm.len(),
+            no_ldm.len()
+        );
+        assert_eq!(zrip::decompress(&ldm).unwrap(), data);
+        assert_eq!(zstd::decode_all(&ldm[..]).unwrap(), data);
+    }
+
+    #[test]
+    fn streaming_ldm_offsets_stay_in_window() {
+        use std::io::{Read, Write};
+        // The encoder keeps up to 2x the window, so a repeat 1.5 windows back
+        // is still in its buffer but out of reach for a decoder.
+        let part = letters(3 << 19, 3);
+        let data = [&part[..], &part[..2 * BLOCK]].concat();
+
+        let opts = zrip::Options::default().window_log(20).ldm(true);
+        let mut encoder = zrip::FrameEncoder::with_options(Vec::new(), 1, &opts).unwrap();
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut decoder = zrip::FrameDecoder::new(&compressed[..]);
+        let mut output = Vec::new();
+        decoder.read_to_end(&mut output).unwrap();
+        assert_eq!(output, data);
+        assert_eq!(zstd::decode_all(&compressed[..]).unwrap(), data);
+    }
+
+    #[test]
+    fn one_shot_ldm_offsets_stay_in_advertised_window() {
+        // Past 128 MiB a frame advertises `window_log`, not its content size.
+        // The zeros keep this fast and leave the pattern's LDM entries alone.
+        const DISTANCE: usize = 2 << 20;
+        let pattern = letters(2 * BLOCK, 4);
+        let mut data = pattern.clone();
+        data.resize(DISTANCE, 0);
+        data.extend_from_slice(&pattern);
+        data.resize(zrip::frame::MAX_WINDOW_SIZE as usize + 1, 0);
+
+        let opts = zrip::Options::default().window_log(20).ldm(true);
+        let compressed = zrip::compress_opts(&data, 1, &opts).unwrap();
+        assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+        assert_eq!(zstd::decode_all(&compressed[..]).unwrap(), data);
+    }
+
+    #[test]
+    fn streaming_ldm_small_window_blocks_fit_window() {
+        use std::io::Write;
+        let part = letters(BLOCK, 2);
+        let data = [&part[..], &part, &part].concat();
+        for window_log in [10, 12, 14, 16, 17] {
+            let opts = zrip::Options::default().window_log(window_log).ldm(true);
+            let mut encoder = zrip::FrameEncoder::with_options(Vec::new(), 1, &opts).unwrap();
+            encoder.write_all(&data).unwrap();
+            let compressed = encoder.finish().unwrap();
+            assert_eq!(
+                zstd::decode_all(&compressed[..]).unwrap(),
+                data,
+                "window_log {window_log}"
+            );
+            assert_eq!(zrip::decompress(&compressed).unwrap(), data);
+        }
     }
 }

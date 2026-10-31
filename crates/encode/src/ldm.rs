@@ -470,7 +470,13 @@ impl LdmState {
         }
     }
 
-    fn generate_sequences(&mut self, combined: &[u8], scan_start: usize, scan_end: usize) {
+    fn generate_sequences(
+        &mut self,
+        combined: &[u8],
+        scan_start: usize,
+        scan_end: usize,
+        window_size: usize,
+    ) {
         self.raw_sequences.clear();
         let min_match = self.params.min_match_length as usize;
         let h_bits = self.h_bits();
@@ -528,7 +534,7 @@ impl LdmState {
                         continue;
                     }
                     let match_pos = cur.offset as usize;
-                    if match_pos >= split {
+                    if !fast::in_window(split, match_pos, window_size) {
                         continue;
                     }
 
@@ -567,6 +573,7 @@ impl LdmState {
                 let match_ref = best_match_pos - best_back;
                 let match_length = best_fwd + best_back;
                 let offset = (match_start - match_ref) as u32;
+                debug_assert!(offset as usize <= window_size);
 
                 self.raw_sequences.push(RawLdmSeq {
                     lit_length: (match_start - anchor) as u32,
@@ -599,12 +606,14 @@ impl LdmState {
     ///
     /// Generates LDM sequences, then for each gap between LDM matches runs
     /// the regular Fast/DFast compressor. Output sequences go into `sequences`.
+    /// LDM offsets stay within `window_size`, the window the frame advertises.
     #[allow(clippy::too_many_arguments)]
     pub fn compress_block(
         &mut self,
         src: &[u8],
         block_start: usize,
         block_end: usize,
+        window_size: usize,
         params: &LevelParams,
         rep_offsets: &[u32; 3],
         hash_table: &mut [u32],
@@ -640,7 +649,7 @@ impl LdmState {
             }
             return;
         }
-        self.generate_sequences(src, block_start, block_end);
+        self.generate_sequences(src, block_start, block_end, window_size);
 
         if self.raw_sequences.is_empty() {
             match params.strategy {
@@ -760,6 +769,60 @@ impl LdmState {
                 }
             }
             sequences.extend_from_slice(&self.segment_sequences);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINDOW: usize = 1 << 12;
+
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        (0..len as u64)
+            .map(|i| xxh64(&i.to_le_bytes(), seed) as u8)
+            .collect()
+    }
+
+    /// Feeds `pattern, gap, pattern` through LDM and returns the sequences
+    /// found for the final repeat.
+    fn find_repeat(gap: usize, window: usize) -> Vec<RawLdmSeq> {
+        // Enough slots that no entry of the pattern gets evicted.
+        let params = LdmParams {
+            hash_log: 16,
+            bucket_size_log: 2,
+            min_match_length: 32,
+            hash_rate_log: 1,
+        };
+        let pattern = noise(WINDOW / 2, 1);
+        let src = [&pattern[..], &noise(gap, 2), &pattern].concat();
+        let repeat_start = pattern.len() + gap;
+
+        let mut ldm = LdmState::new(&params);
+        ldm.fill_only(&src, 0, repeat_start);
+        ldm.generate_sequences(&src, repeat_start, src.len(), window);
+        ldm.raw_sequences
+    }
+
+    #[test]
+    fn matches_within_window_are_found() {
+        let found = find_repeat(WINDOW / 2, WINDOW);
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|s| s.offset == WINDOW as u32));
+    }
+
+    #[test]
+    fn matches_beyond_window_are_rejected() {
+        // One byte past the window, through the 2x the encoder keeps, and on.
+        for distance in [WINDOW + 1, WINDOW * 3 / 2, WINDOW * 2, WINDOW * 5 / 2] {
+            let gap = distance - WINDOW / 2;
+            let found = find_repeat(gap, distance);
+            assert!(
+                found.iter().all(|s| s.offset as usize == distance) && !found.is_empty(),
+                "control: distance {distance}"
+            );
+            assert!(find_repeat(gap, WINDOW).is_empty(), "distance {distance}");
         }
     }
 }

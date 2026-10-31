@@ -102,8 +102,7 @@ fn write_frame_header_inner(
 ) -> Result<(), CompressError> {
     output.extend_from_slice(&ZSTD_MAGIC.to_le_bytes())?;
 
-    let single_segment =
-        dict_id.is_none() && content_size.is_some_and(|size| size as u64 <= MAX_WINDOW_SIZE);
+    let single_segment = dict_id.is_none() && content_size.is_some_and(fits_single_segment);
     let fcs_size = content_size.map_or(0, |size| {
         frame_content_size_field_size(size, single_segment)
     });
@@ -153,6 +152,21 @@ fn write_frame_header_inner(
         _ => output.extend_from_slice(&(content_size as u64).to_le_bytes())?,
     }
     Ok(())
+}
+
+/// Whether a frame without a dictionary declares its content size as its
+/// window instead of writing a window descriptor.
+fn fits_single_segment(content_size: usize) -> bool {
+    content_size as u64 <= MAX_WINDOW_SIZE
+}
+
+/// The window a frame without a dictionary advertises for `content_size` bytes.
+fn frame_window_size(content_size: usize, window_log: u32) -> usize {
+    if fits_single_segment(content_size) {
+        content_size
+    } else {
+        1usize << window_log
+    }
 }
 
 fn frame_content_size_field_size(content_size: usize, single_segment: bool) -> usize {
@@ -293,13 +307,15 @@ fn compress_frame(
 
         #[cfg(feature = "ldm")]
         let mut ldm_state = params.ldm_params.as_ref().map(ldm::LdmState::new);
+        let window_size = frame_window_size(input.len(), params.window_log);
+        let block_size = MAX_BLOCK_SIZE.min(window_size);
 
         match params.strategy {
             Strategy::Fast => {
                 let hash_size = 1usize << params.hash_log;
                 let mut hash_table = vec![0u32; hash_size];
                 while offset < input.len() {
-                    let chunk_size = (input.len() - offset).min(MAX_BLOCK_SIZE);
+                    let chunk_size = (input.len() - offset).min(block_size);
                     let block_end = offset + chunk_size;
                     let is_last = block_end >= input.len();
                     let block = &input[offset..block_end];
@@ -314,6 +330,7 @@ fn compress_frame(
                                 input,
                                 offset,
                                 block_end,
+                                window_size,
                                 params,
                                 &rep_offsets,
                                 &mut hash_table,
@@ -368,7 +385,7 @@ fn compress_frame(
                 let mut hash_short = vec![0u32; short_size];
                 let mut hash_long = vec![0u32; long_size];
                 while offset < input.len() {
-                    let chunk_size = (input.len() - offset).min(MAX_BLOCK_SIZE);
+                    let chunk_size = (input.len() - offset).min(block_size);
                     let block_end = offset + chunk_size;
                     let is_last = block_end >= input.len();
                     let block = &input[offset..block_end];
@@ -382,6 +399,7 @@ fn compress_frame(
                                 input,
                                 offset,
                                 block_end,
+                                window_size,
                                 params,
                                 &rep_offsets,
                                 &mut hash_short,
