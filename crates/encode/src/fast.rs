@@ -944,7 +944,7 @@ fn confirms<const MLS: usize>(src: &[u8], pos: usize, v: u64) -> bool {
 /// One wrapping compare covers both bounds: `idx >= ip` wraps to a huge
 /// distance.
 #[inline(always)]
-fn in_window(ip: usize, idx: usize, max_distance: usize) -> bool {
+pub(crate) fn in_window(ip: usize, idx: usize, max_distance: usize) -> bool {
     ip.wrapping_sub(idx).wrapping_sub(1) < max_distance
 }
 

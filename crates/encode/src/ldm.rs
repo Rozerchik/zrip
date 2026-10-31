@@ -534,7 +534,7 @@ impl LdmState {
                         continue;
                     }
                     let match_pos = cur.offset as usize;
-                    if match_pos >= split || split - match_pos > window_size {
+                    if !fast::in_window(split, match_pos, window_size) {
                         continue;
                     }
 
