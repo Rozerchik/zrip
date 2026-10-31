@@ -605,12 +605,14 @@ impl LdmState {
     ///
     /// Generates LDM sequences, then for each gap between LDM matches runs
     /// the regular Fast/DFast compressor. Output sequences go into `sequences`.
+    /// LDM offsets stay within `window_size`, the window the frame advertises.
     #[allow(clippy::too_many_arguments)]
     pub fn compress_block(
         &mut self,
         src: &[u8],
         block_start: usize,
         block_end: usize,
+        window_size: usize,
         params: &LevelParams,
         rep_offsets: &[u32; 3],
         hash_table: &mut [u32],
@@ -646,7 +648,7 @@ impl LdmState {
             }
             return;
         }
-        self.generate_sequences(src, block_start, block_end, 1 << params.window_log);
+        self.generate_sequences(src, block_start, block_end, window_size);
 
         if self.raw_sequences.is_empty() {
             match params.strategy {

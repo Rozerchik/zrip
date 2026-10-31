@@ -1077,4 +1077,40 @@ mod ldm {
         let decompressed = zrip::decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
     }
+
+    /// Pseudo-random bytes from 16 letters: compressible, so they reach the
+    /// match finders, but free of repeats of their own.
+    fn letters(len: usize, seed: u32) -> Vec<u8> {
+        let mut x = seed;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                b'a' + (x >> 28) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_shot_ldm_reaches_whole_single_segment_window() {
+        // A single-segment frame's window is its content size, whatever
+        // `window_log` the match finder uses.
+        let part = letters(4 << 17, 1);
+        let data = [&part[..], &part].concat();
+
+        let opts_no_ldm = zrip::Options::default().window_log(17);
+        let no_ldm = zrip::compress_opts(&data, 1, &opts_no_ldm).unwrap();
+        let opts_ldm = zrip::Options::default().window_log(17).ldm(true);
+        let ldm = zrip::compress_opts(&data, 1, &opts_ldm).unwrap();
+
+        assert!(
+            ldm.len() < no_ldm.len() * 3 / 4,
+            "LDM should find the repeat: ldm={} no_ldm={}",
+            ldm.len(),
+            no_ldm.len()
+        );
+        assert_eq!(zrip::decompress(&ldm).unwrap(), data);
+        assert_eq!(zstd::decode_all(&ldm[..]).unwrap(), data);
+    }
 }

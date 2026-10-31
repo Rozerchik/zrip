@@ -259,6 +259,7 @@ impl<W: Write> FrameEncoder<W> {
                     &self.window_buf,
                     plen,
                     self.window_buf.len(),
+                    1usize << self.params.window_log,
                     &self.params,
                     &self.rep_offsets,
                     &mut self.hash_table,
