@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `DecompressContext::with_dict` and `FrameDecoder::with_dict` load the
+  predefined sequence table when a block selects Predefined_Mode. They kept
+  decoding with the dictionary's table, so valid frames failed with
+  `CorruptSequences` or returned wrong bytes. Only dictionaries with their
+  own sequence tables were affected, such as those from `zstd --train`.
+
 ## [0.8.11] - 2026-10-19
 
 - Enforce `#![forbid(unsafe_code)]` for every build. The `paranoid` feature
