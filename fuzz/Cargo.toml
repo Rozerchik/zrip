@@ -48,6 +48,11 @@ path = "fuzz_targets/roundtrip_dict.rs"
 doc = false
 
 [[bin]]
+name = "zrip_fuzz_dict_decode_paths"
+path = "fuzz_targets/dict_decode_paths.rs"
+doc = false
+
+[[bin]]
 name = "zrip_fuzz_corrupt_bitflip"
 path = "fuzz_targets/corrupt_bitflip.rs"
 doc = false
