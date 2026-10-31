@@ -38,7 +38,8 @@ and reuses them across calls.
 
 ### Levels
 
-Parameters follow C zstd's `ZSTD_defaultCParameters`, except L-7 to L-4.
+Parameters start from C zstd's `ZSTD_defaultCParameters`, except L-7 to L-4.
+L-3 to L4 are retuned to search less in long literal runs.
 Level 0 maps to level 1. Level -8 runs as L-7. Small inputs clamp the hash
 and window logs to the input size, so tables stay cheap to clear.
 
@@ -48,13 +49,13 @@ and window logs to the input size, so tables stay cheap to clear.
 | -6 | Fast | 32 KiB | 512 KiB | 8 | 9 | 5 |
 | -5 | Fast | 32 KiB | 512 KiB | 8 | 5 | 6 |
 | -4 | Fast | 32 KiB | 512 KiB | 7 | 4 | 5 |
-| -3 | Fast | 64 KiB | 512 KiB | 6 | 4 | 7 |
-| -2 | Fast | 64 KiB | 512 KiB | 6 | 3 | 7 |
-| -1 | Fast | 64 KiB | 512 KiB | 6 | 2 | 7 |
-| 1 | Fast | 128 KiB | 512 KiB | 6 | 1 | 7 |
-| 2 | Fast | 256 KiB | 1 MiB | 6 | 1 | 7 |
-| 3 | DFast | 512 + 256 KiB | 2 MiB | 5 | 1 | 4 |
-| 4 | DFast | 2x 1 MiB | 16 MiB | 5 | 1 | 6 |
+| -3 | Fast | 64 KiB | 512 KiB | 6 | 4 | 5 |
+| -2 | Fast | 64 KiB | 512 KiB | 6 | 3 | 5 |
+| -1 | Fast | 64 KiB | 512 KiB | 6 | 2 | 5 |
+| 1 | Fast | 128 KiB | 512 KiB | 7 | 1 | 4 |
+| 2 | Fast | 256 KiB | 1 MiB | 7 | 1 | 4 |
+| 3 | DFast | 512 + 256 KiB | 2 MiB | 5 | 1 | 0 |
+| 4 | DFast | 2x 1 MiB | 16 MiB | 5 | 1 | 3 |
 
 `Target` sets the search step. The step grows by one every
 `1 << search_strength` bytes without a match.
@@ -63,8 +64,14 @@ and window logs to the input size, so tables stay cheap to clear.
   frames hold few sequences, no Huffman tables, and decode fast.
 - **L-6 to L-4** hash 8 (or 7) bytes at shorter steps than C's negative
   levels. Longer matches leave fewer bytes to Huffman coding, the costly part.
-- **L3** grows its step every 16 bytes instead of C's 256, so data with few
-  matches encodes fast.
+- **L-3 to L2** grow their step faster than C, so long literal runs cost
+  fewer probes. Frequent matches keep the initial step and most of the ratio.
+  L1 and L2 hash seven bytes to favor longer matches.
+- **L3 and L4** list the search strength for inputs above 256 KiB. L3 grows
+  its step after each unsuccessful probe. One-shot calls and `CompressContext`
+  use 4 (L3) and 6 (L4) for inputs up to 256 KiB, not counting a dictionary,
+  because sparse initial tables cost too much ratio there. `FrameEncoder` does
+  not know its input size and always uses the listed values.
 
 ### Fast match finder (`fast.rs`)
 
