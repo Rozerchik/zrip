@@ -85,13 +85,8 @@ pub fn level_params(level: i32) -> Option<LevelParams> {
 /// Level 0 is treated as "library default" and maps to level 1.
 pub fn level_params_for_size(level: i32, src_len: usize) -> Option<LevelParams> {
     let mut params = level_params_inner(level)?;
-    // Sparse initial tables cost too much ratio on inputs of up to two blocks.
-    if src_len <= 256 * 1024 {
-        params.search_strength = match level {
-            3 => 4,
-            4 => 6,
-            _ => params.search_strength,
-        };
+    if let Some(search_strength) = short_input_search_strength(level, src_len) {
+        params.search_strength = search_strength;
     }
     params.hash_log = params.hash_log.clamp(HASH_LOG_MIN, HASH_LOG_MAX);
     params.chain_log = params.chain_log.clamp(HASH_LOG_MIN, HASH_LOG_MAX);
@@ -111,6 +106,34 @@ pub fn level_params_for_size(level: i32, src_len: usize) -> Option<LevelParams> 
         }
     }
     Some(params)
+}
+
+/// Returns the compression parameters for `input_len` bytes after a
+/// `prefix_len`-byte dictionary. The tables and window cover both, while the
+/// search density follows the input alone, as in a frame without a dictionary.
+pub(crate) fn level_params_with_prefix(
+    level: i32,
+    prefix_len: usize,
+    input_len: usize,
+) -> Option<LevelParams> {
+    let mut params = level_params_for_size(level, prefix_len.saturating_add(input_len))?;
+    if let Some(search_strength) = short_input_search_strength(level, input_len) {
+        params.search_strength = search_strength;
+    }
+    Some(params)
+}
+
+/// Search strength for inputs of up to two blocks at the levels that search
+/// sparsely on larger ones. Sparse initial tables cost too much ratio there.
+fn short_input_search_strength(level: i32, input_len: usize) -> Option<u32> {
+    if input_len > 256 * 1024 {
+        return None;
+    }
+    match level {
+        3 => Some(4),
+        4 => Some(6),
+        _ => None,
+    }
 }
 
 pub const HASH_LOG_MIN: u32 = 6;

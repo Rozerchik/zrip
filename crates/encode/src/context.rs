@@ -353,9 +353,9 @@ impl CompressContext {
         input: &[u8],
         dict: &Dictionary,
     ) -> Result<Cow<'_, [u8]>, CompressError> {
-        let total_window = dict.content().len().saturating_add(input.len());
-        let params = strategy::level_params_for_size(self.level, total_window)
-            .expect("level validated at construction");
+        let params =
+            strategy::level_params_with_prefix(self.level, dict.content().len(), input.len())
+                .expect("level validated at construction");
         self.workspace.prev_ll = dict
             .ll_table()
             .map(|(dt, al)| block_encoder::FseEncodeTable::from_decode_table(dt, al, 35));
@@ -393,8 +393,7 @@ impl CompressContext {
         output: &mut S,
     ) -> Result<(), CompressError> {
         let prep = self.prepared.as_ref().unwrap();
-        let total_window = prep.prefix_len + input.len();
-        let params = strategy::level_params_for_size(self.level, total_window)
+        let params = strategy::level_params_with_prefix(self.level, prep.prefix_len, input.len())
             .expect("level validated at construction");
 
         let dict_id = prep.dict_id;
@@ -641,8 +640,7 @@ impl CompressContext {
         let rep_offsets = prep.rep_offsets;
         let prefix = &prep.combined[..prefix_len];
 
-        let total_window = prefix_len.saturating_add(input.len());
-        let params = strategy::level_params_for_size(self.level, total_window)
+        let params = strategy::level_params_with_prefix(self.level, prefix_len, input.len())
             .expect("level validated at construction");
         self.workspace.prev_huffman = prep.huf_table.clone();
         self.workspace.prev_ll = prep.ll_table.clone();

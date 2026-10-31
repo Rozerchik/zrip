@@ -452,8 +452,7 @@ pub fn compress_with_dict(
     level: i32,
     dict: &zrip_core::dict::Dictionary,
 ) -> Result<Vec<u8>, CompressError> {
-    let total_window = dict.content().len() + input.len();
-    let params = strategy::level_params_for_size(level, total_window)
+    let params = strategy::level_params_with_prefix(level, dict.content().len(), input.len())
         .ok_or(CompressError::InvalidLevel(level))?;
 
     let mut output = Vec::with_capacity(input.len() + 32);
