@@ -47,8 +47,8 @@ Level -1
 <rect x="349" y="266" width="35" height="18" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="349" y="251" width="35" height="15" opacity="1" fill="#4680C4" stroke="none"/>
 <rect x="349" y="245" width="35" height="6" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="385" y="261" width="36" height="23" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="385" y="246" width="36" height="15" opacity="1" fill="#C45050" stroke="none"/>
+<rect x="385" y="260" width="36" height="24" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="385" y="246" width="36" height="14" opacity="1" fill="#C45050" stroke="none"/>
 <rect x="385" y="238" width="36" height="8" opacity="1" fill="#F87171" stroke="none"/>
 <rect x="422" y="258" width="35" height="26" opacity="1" fill="#F59E0B" stroke="none"/>
 <rect x="422" y="244" width="35" height="14" opacity="1" fill="#C47D08" stroke="none"/>
@@ -112,8 +112,8 @@ Level -1
 <rect x="349" y="518" width="35" height="23" opacity="1" fill="#4680C4" stroke="none"/>
 <rect x="349" y="512" width="35" height="6" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="385" y="535" width="36" height="26" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="385" y="513" width="36" height="22" opacity="1" fill="#C45050" stroke="none"/>
-<rect x="385" y="505" width="36" height="8" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="385" y="512" width="36" height="23" opacity="1" fill="#C45050" stroke="none"/>
+<rect x="385" y="505" width="36" height="7" opacity="1" fill="#F87171" stroke="none"/>
 <rect x="422" y="533" width="35" height="28" opacity="1" fill="#F59E0B" stroke="none"/>
 <rect x="422" y="510" width="35" height="23" opacity="1" fill="#C47D08" stroke="none"/>
 <rect x="422" y="502" width="35" height="8" opacity="1" fill="#F59E0B" stroke="none"/>
@@ -129,8 +129,8 @@ Level 1
 <rect x="602" y="526" width="35" height="35" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="602" y="505" width="35" height="21" opacity="1" fill="#4680C4" stroke="none"/>
 <rect x="602" y="499" width="35" height="6" opacity="1" fill="#60A5FA" stroke="none"/>
-<rect x="639" y="524" width="35" height="37" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="639" y="502" width="35" height="22" opacity="1" fill="#C45050" stroke="none"/>
+<rect x="639" y="523" width="35" height="38" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="639" y="502" width="35" height="21" opacity="1" fill="#C45050" stroke="none"/>
 <rect x="639" y="493" width="35" height="9" opacity="1" fill="#F87171" stroke="none"/>
 <rect x="675" y="505" width="36" height="56" opacity="1" fill="#F59E0B" stroke="none"/>
 <rect x="675" y="485" width="36" height="20" opacity="1" fill="#C47D08" stroke="none"/>
@@ -165,8 +165,8 @@ Low compressibility
 <rect x="95" y="790" width="36" height="41" opacity="1" fill="#4680C4" stroke="none"/>
 <rect x="95" y="789" width="36" height="1" opacity="1" fill="#60A5FA" stroke="none"/>
 <rect x="132" y="831" width="35" height="7" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="132" y="790" width="35" height="41" opacity="1" fill="#C45050" stroke="none"/>
-<rect x="132" y="788" width="35" height="2" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="132" y="791" width="35" height="40" opacity="1" fill="#C45050" stroke="none"/>
+<rect x="132" y="789" width="35" height="2" opacity="1" fill="#F87171" stroke="none"/>
 <rect x="168" y="830" width="36" height="8" opacity="1" fill="#F59E0B" stroke="none"/>
 <rect x="168" y="789" width="36" height="41" opacity="1" fill="#C47D08" stroke="none"/>
 <rect x="168" y="787" width="36" height="2" opacity="1" fill="#F59E0B" stroke="none"/>
