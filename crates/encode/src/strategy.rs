@@ -80,10 +80,14 @@ pub fn level_params(level: i32) -> Option<LevelParams> {
 /// Returns the compression parameters for a given level, sized for `src_len`.
 ///
 /// Uses fixed parameters per level with log values clamped down for small inputs.
+/// L3 and L4 keep denser searches through 256 KiB to preserve matches on short inputs.
 ///
 /// Level 0 is treated as "library default" and maps to level 1.
 pub fn level_params_for_size(level: i32, src_len: usize) -> Option<LevelParams> {
     let mut params = level_params_inner(level)?;
+    if let Some(search_strength) = short_input_search_strength(level, src_len) {
+        params.search_strength = search_strength;
+    }
     params.hash_log = params.hash_log.clamp(HASH_LOG_MIN, HASH_LOG_MAX);
     params.chain_log = params.chain_log.clamp(HASH_LOG_MIN, HASH_LOG_MAX);
     params.window_log = params.window_log.clamp(WINDOW_LOG_MIN, WINDOW_LOG_MAX);
@@ -102,6 +106,34 @@ pub fn level_params_for_size(level: i32, src_len: usize) -> Option<LevelParams> 
         }
     }
     Some(params)
+}
+
+/// Returns the compression parameters for `input_len` bytes after a
+/// `prefix_len`-byte dictionary. The tables and window cover both, while the
+/// search density follows the input alone, as in a frame without a dictionary.
+pub(crate) fn level_params_with_prefix(
+    level: i32,
+    prefix_len: usize,
+    input_len: usize,
+) -> Option<LevelParams> {
+    let mut params = level_params_for_size(level, prefix_len.saturating_add(input_len))?;
+    if let Some(search_strength) = short_input_search_strength(level, input_len) {
+        params.search_strength = search_strength;
+    }
+    Some(params)
+}
+
+/// Search strength for inputs of up to two blocks at the levels that search
+/// sparsely on larger ones. Sparse initial tables cost too much ratio there.
+fn short_input_search_strength(level: i32, input_len: usize) -> Option<u32> {
+    if input_len > 256 * 1024 {
+        return None;
+    }
+    match level {
+        3 => Some(4),
+        4 => Some(6),
+        _ => None,
+    }
 }
 
 pub const HASH_LOG_MIN: u32 = 6;
@@ -257,6 +289,9 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
+        // L-3 through L-1 grow the step every 32 bytes without a match.
+        // Long literal runs need fewer probes, while frequent matches keep
+        // the initial step and most of the compression ratio.
         -3 => LevelParams {
             strategy: Strategy::Fast,
             window_log: 19,
@@ -265,7 +300,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 4,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -278,7 +313,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 3,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -291,20 +326,23 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 6,
             target_length: 2,
-            search_strength: 7,
+            search_strength: 5,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
+        // L1 and L2 hash seven bytes to favor longer matches and grow the
+        // step every 16 bytes without a match. Dense matches keep the
+        // initial step, while long literal runs need fewer probes.
         1 => LevelParams {
             strategy: Strategy::Fast,
             window_log: 19,
             hash_log: 15,
             chain_log: 15,
             search_log: 0,
-            min_match: 6,
+            min_match: 7,
             target_length: 1,
-            search_strength: 7,
+            search_strength: 4,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
@@ -315,15 +353,15 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             hash_log: 16,
             chain_log: 16,
             search_log: 0,
-            min_match: 6,
+            min_match: 7,
             target_length: 1,
-            search_strength: 7,
+            search_strength: 4,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
-        // C zstd's level 3 tables. The step grows every 16 bytes without a
-        // match (C: 256), so data with few matches encodes fast.
+        // C zstd's level 3 tables. On large inputs, grow the step after each
+        // unsuccessful probe so long literal runs do not dominate the search.
         3 => LevelParams {
             strategy: Strategy::DFast,
             window_log: 21,
@@ -332,12 +370,13 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 1,
             min_match: 5,
             target_length: 1,
-            search_strength: 4,
+            search_strength: 0,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,
         },
-        // C zstd's level 4 tables, with a 16 MiB window.
+        // C zstd's level 4 tables, with a 16 MiB window and faster skip
+        // growth on large inputs.
         4 => LevelParams {
             strategy: Strategy::DFast,
             window_log: 24,
@@ -346,7 +385,7 @@ fn level_params_inner(level: i32) -> Option<LevelParams> {
             search_log: 0,
             min_match: 5,
             target_length: 1,
-            search_strength: 6,
+            search_strength: 3,
             force_raw_literals: false,
             #[cfg(feature = "ldm")]
             ldm_params: None,

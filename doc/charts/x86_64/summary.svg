@@ -28,9 +28,9 @@ seconds / GB
 <text x="151" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
 C zstd
 </text>
-<rect x="223" y="289" width="80" height="24" opacity="1" fill="#F87171" stroke="none"/>
-<rect x="223" y="259" width="80" height="30" opacity="1" fill="#C45050" stroke="none"/>
-<rect x="223" y="251" width="80" height="8" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="223" y="291" width="80" height="22" opacity="1" fill="#F87171" stroke="none"/>
+<rect x="223" y="260" width="80" height="31" opacity="1" fill="#C45050" stroke="none"/>
+<rect x="223" y="253" width="80" height="7" opacity="1" fill="#F87171" stroke="none"/>
 <text x="263" y="329" dy="0.5ex" text-anchor="middle" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E6EDF3" font-weight="bold">
 zrip
 </text>
