@@ -810,6 +810,10 @@ mod tests {
 
     #[test]
     fn matches_beyond_window_are_rejected() {
-        assert!(find_repeat(WINDOW * 2, WINDOW).is_empty());
+        // One byte past the window, through the 2x the encoder keeps, and on.
+        for distance in [WINDOW + 1, WINDOW * 3 / 2, WINDOW * 2, WINDOW * 5 / 2] {
+            let gap = distance - WINDOW / 2;
+            assert!(find_repeat(gap, WINDOW).is_empty(), "distance {distance}");
+        }
     }
 }
