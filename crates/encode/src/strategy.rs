@@ -415,7 +415,7 @@ impl Options {
     }
 
     /// Enables long distance matching. Unless `window_log` is set, the window
-    /// defaults to 2^27 bytes.
+    /// defaults to 2^27 bytes. One-shot calls shrink it to the input.
     #[cfg(feature = "ldm")]
     #[must_use]
     pub fn ldm(mut self, enable: bool) -> Self {
