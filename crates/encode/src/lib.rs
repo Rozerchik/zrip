@@ -658,6 +658,19 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "ldm")]
+    #[test]
+    fn ldm_defaults_window_log_to_27() {
+        let mut params = strategy::level_params(3).unwrap();
+        strategy::apply_options(&mut params, &strategy::Options::default().ldm(true));
+        assert_eq!(params.window_log, 27);
+
+        let mut params = strategy::level_params(3).unwrap();
+        let opts = strategy::Options::default().window_log(22).ldm(true);
+        strategy::apply_options(&mut params, &opts);
+        assert_eq!(params.window_log, 22);
+    }
+
     /// Bytes from a skewed alphabet: about 3.5 bits of order-0 entropy per
     /// byte and few repeated 6-byte strings.
     fn skewed_bytes(len: usize) -> Vec<u8> {
